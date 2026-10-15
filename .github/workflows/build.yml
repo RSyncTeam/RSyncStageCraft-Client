@@ -1,0 +1,93 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOLUTION: RSyncStageCraft-Client.slnx
+  # Dalamud 15.0.3.7, pinned to one file of goatcorp/dalamud-distrib and
+  # checked against its SHA-256 before use.
+  DALAMUD_URL: https://raw.githubusercontent.com/goatcorp/dalamud-distrib/b59ce28c39e8da57b8d9becac07cca8faf138350/latest.zip
+  DALAMUD_SHA256: 82d3efad4615d4b40fdabd458132473d6b69e341cd700293a6bb3ff2b5b77547
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build:
+    # Release is the build that ships. Debug runs the same tests where the
+    # development diagnostics are compiled in, and uploads nothing.
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [ Release, Debug ]
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
+
+    - name: Install .NET
+      uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Download Dalamud
+      shell: pwsh
+      run: |
+        Invoke-WebRequest -Uri $env:DALAMUD_URL -OutFile dalamud.zip
+        $hash = (Get-FileHash dalamud.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($hash -ne $env:DALAMUD_SHA256) { Write-Host "::error title=Dalamud::unexpected SHA-256 $hash"; exit 1 }
+        Expand-Archive -Force dalamud.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
+        Remove-Item dalamud.zip
+
+    - name: Restore
+      run: dotnet restore ${{ env.SOLUTION }} --locked-mode
+
+    - name: Build
+      run: dotnet build ${{ env.SOLUTION }} --configuration ${{ matrix.configuration }} --no-restore
+
+    - name: Test
+      shell: pwsh
+      run: |
+        dotnet test $env:SOLUTION --configuration ${{ matrix.configuration }} --no-build --no-restore --verbosity quiet --logger trx --results-directory TestResults --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type none
+        $code = $LASTEXITCODE
+        Get-ChildItem TestResults -Filter *.trx -Recurse | ForEach-Object {
+          [xml]$trx = Get-Content $_.FullName
+          $c = $trx.TestRun.ResultSummary.Counters
+          Write-Host "::notice title=Tests ${{ matrix.configuration }}::total=$($c.total) passed=$($c.passed) failed=$($c.failed)"
+        }
+        exit $code
+
+    - name: Record plugin hashes
+      if: matrix.configuration == 'Release'
+      shell: pwsh
+      run: |
+        Get-ChildItem src\RSyncStageCraft\bin\Release -Recurse -File |
+          Where-Object { $_.Name -in @('RSyncStageCraft.dll', 'RSyncStageCraft.json', 'latest.zip') } |
+          ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "::notice title=Plugin SHA-256 $($_.Name)::$hash"
+          }
+
+    - name: Store the plugin package
+      if: matrix.configuration == 'Release' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: RSyncStageCraft
+        path: src/RSyncStageCraft/bin/Release/**/latest.zip
+        if-no-files-found: error
+        retention-days: 14

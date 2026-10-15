@@ -1,0 +1,17 @@
+RSyncStageCraft
+Copyright (C) 2026 RSyncTeam
+
+The protocol project (src/RSyncStageCraft.Protocol) and its tests
+(tests/RSyncStageCraft.Protocol.Tests) are licensed under the MIT License.
+See src/RSyncStageCraft.Protocol/LICENSE.
+
+Everything else in this repository, including the RSyncStageCraft client
+(src/RSyncStageCraft.Client) and Dalamud plugin (src/RSyncStageCraft), is
+licensed under the GNU Affero General Public License, version 3 only
+(AGPL-3.0-only). See LICENSE.
+
+Third-party material keeps its own licence; in particular
+src/RSyncStageCraft/Data/BNpcLink.csv is licensed under the GNU General
+Public License, version 3 (see BNpcLink.LICENSE beside it).
+
+Third-party material and its licences are listed in THIRD-PARTY-NOTICES.md.

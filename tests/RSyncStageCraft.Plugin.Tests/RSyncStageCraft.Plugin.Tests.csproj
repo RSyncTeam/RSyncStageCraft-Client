@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows7.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Annotations only: tests moved from nullable-enabled projects keep their ? marks. -->
+    <Nullable>annotations</Nullable>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <!-- Development tools and the self-test UI exist only in Debug builds.
+       Release never defines this. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);RSC_DEVELOPMENT</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <PropertyGroup>
+    <!-- Same Dalamud install the plugin builds against (CI unpacks it here). -->
+    <DalamudLibPath Condition="'$(DalamudLibPath)' == ''">$(APPDATA)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="FFXIVClientStructs">
+      <HintPath>$(DalamudLibPath)FFXIVClientStructs.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="InteropGenerator.Runtime">
+      <HintPath>$(DalamudLibPath)InteropGenerator.Runtime.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Dalamud">
+      <HintPath>$(DalamudLibPath)Dalamud.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(DalamudLibPath)Newtonsoft.Json.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+  <!-- Dalamud ships FFXIVClientStructs.pdb as a Windows (MSF) PDB, which the
+       artifact scan cannot read. It is a debug file of a prebuilt dependency
+       and is never shipped, so only that one related file of the
+       FFXIVClientStructs reference is kept out of the test output, before
+       anything is copied. The DLL, its XML and every other PDB are still
+       copied. -->
+  <Target Name="RscLeaveOutClientStructsWindowsPdb" AfterTargets="ResolveAssemblyReferences">
+    <PropertyGroup>
+      <RscClientStructsPdb>$([System.IO.Path]::GetFullPath('$(DalamudLibPath)FFXIVClientStructs.pdb'))</RscClientStructsPdb>
+    </PropertyGroup>
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="'%(FullPath)' == '$(RscClientStructsPdb)'" />
+    </ItemGroup>
+  </Target>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RSyncStageCraft\RSyncStageCraft.csproj" />
+    <ProjectReference Include="..\RSyncStageCraft.Client.Tests\RSyncStageCraft.Client.Tests.csproj" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>

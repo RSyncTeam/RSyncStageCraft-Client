@@ -1,0 +1,10 @@
+<Project>
+  <!-- Reproducible builds: no machine path or source text in any output. -->
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+    <EmbedAllSources>false</EmbedAllSources>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <PathMap>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)'))=/_/</PathMap>
+  </PropertyGroup>
+</Project>

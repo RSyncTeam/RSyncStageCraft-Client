@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <Author>RSyncTeam</Author>
+    <Name>RSyncStageCraft</Name>
+    <Punchline>Server-authoritative staged synchronization.</Punchline>
+    <Description>Server-authoritative synchronization for staged actors, furnishing, and appearance state.</Description>
+    <RepoUrl>https://github.com/RSyncTeam/RSyncStageCraft-Client</RepoUrl>
+    <Tags>sync;stagecraft;penumbra;glamourer;furnishing;networking</Tags>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Copyright>Copyright (C) 2026 RSyncTeam</Copyright>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <!-- Development diagnostics exist only in Debug builds. Release never
+       defines this. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);RSC_DEVELOPMENT</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Pinned LuminaSupplemental BNpcLink (GPL-3.0); see Data/BNpcLink.LICENSE. -->
+    <EmbeddedResource Include="Data\BNpcLink.csv" LogicalName="RSyncStageCraft.Data.BNpcLink.csv" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RSyncStageCraft.Client\RSyncStageCraft.Client.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Glamourer.Api" Version="[2.8.2]" />
+    <PackageReference Include="Penumbra.Api" Version="[5.15.1]" />
+  </ItemGroup>
+  <!-- The licences and notices travel with the plugin package: the AGPL text,
+       the GPL text of the embedded BNpcLink data, the third-party notices and
+       SOURCE.txt naming the exact source commit. A public test checks them. -->
+  <ItemGroup>
+    <None Include="..\..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Data\BNpcLink.LICENSE" Link="BNpcLink.LICENSE" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="WriteSourceNotice" AfterTargets="CopyFilesToOutputDirectory">
+    <Exec Command="git rev-parse HEAD" ConsoleToMSBuild="true" StandardOutputImportance="low" StandardErrorImportance="low" IgnoreExitCode="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="RscSourceCommit" />
+    </Exec>
+    <!-- Only a full commit id is written; anything else (no git, an error) becomes "unknown". -->
+    <PropertyGroup>
+      <RscSourceCommit Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(RscSourceCommit)', '^[0-9a-f]{40}$'))">unknown</RscSourceCommit>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(OutDir)SOURCE.txt" Overwrite="true" WriteOnlyWhenDifferent="true"
+      Lines="RSyncStageCraft source code: https://github.com/RSyncTeam/RSyncStageCraft-Client;Commit: $(RscSourceCommit);Licence: AGPL-3.0-only (see LICENSE), with the parts listed in THIRD-PARTY-NOTICES.md" />
+  </Target>
+</Project>

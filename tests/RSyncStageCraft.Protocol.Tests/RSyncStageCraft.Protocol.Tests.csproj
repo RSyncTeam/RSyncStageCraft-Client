@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Annotations only: tests moved from nullable-enabled projects keep their ? marks. -->
+    <Nullable>annotations</Nullable>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <!-- Shared test data (TestLocations and contract helpers) for the client and plugin tests. -->
+    <InternalsVisibleTo Include="RSyncStageCraft.Client.Tests" />
+    <InternalsVisibleTo Include="RSyncStageCraft.Plugin.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RSyncStageCraft.Protocol\RSyncStageCraft.Protocol.csproj" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>

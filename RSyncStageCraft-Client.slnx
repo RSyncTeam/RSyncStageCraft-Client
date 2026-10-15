@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="src/RSyncStageCraft.Protocol/RSyncStageCraft.Protocol.csproj" />
+  <Project Path="src/RSyncStageCraft.Client/RSyncStageCraft.Client.csproj" />
+  <Project Path="src/RSyncStageCraft/RSyncStageCraft.csproj" />
+  <Project Path="tests/RSyncStageCraft.Protocol.Tests/RSyncStageCraft.Protocol.Tests.csproj" />
+  <Project Path="tests/RSyncStageCraft.Client.Tests/RSyncStageCraft.Client.Tests.csproj" />
+  <Project Path="tests/RSyncStageCraft.Plugin.Tests/RSyncStageCraft.Plugin.Tests.csproj" />
+</Solution>
