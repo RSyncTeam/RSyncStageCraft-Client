@@ -21,6 +21,7 @@ public sealed class ProtocolPurityTests
         "Actors/ActorAnimationAllowlist.cs",
         "Appearance/AppearanceBlobEnvelope.cs",
         "Appearance/AppearanceBundle.cs",
+        "Appearance/SkeletonResourceGroup.cs",
         "Authentication/AccessKeyCredentialFormat.cs",
         "Authentication/AuthenticationIoOperation.cs",
         "Authentication/AuthenticationMessageCodec.cs",
