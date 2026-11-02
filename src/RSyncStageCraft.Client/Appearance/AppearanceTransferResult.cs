@@ -63,6 +63,8 @@ public enum AppearanceTransferStatus
     CacheOverLimit,
     /// <summary>The appearance changed since its summary; nothing was sent. Capture again.</summary>
     CaptureChanged,
+    /// <summary>The capture holds a skeleton group, which can only be previewed; nothing was sent.</summary>
+    SkeletonGroupUploadNotEnabled,
 }
 
 /// <summary>
@@ -114,6 +116,7 @@ public sealed record AppearanceTransferResult(AppearanceTransferStatus Status, s
         AppearanceTransferStatus.CacheFull => "The local appearance cache has no room within its size limit; appearances in use take the space. Free space on the drive or delete unused appearances.",
         AppearanceTransferStatus.CacheOverLimit => "The local appearance cache is over its selected limit, so new downloads are paused until appearances in use are released. Free space on the drive or delete unused appearances.",
         AppearanceTransferStatus.CaptureChanged => "Your appearance changed since the summary. Nothing was sent; capture again.",
+        AppearanceTransferStatus.SkeletonGroupUploadNotEnabled => "This capture includes a skeleton group, which can only be previewed in this build. Nothing was sent.",
         _ => "Unknown result.",
     };
 

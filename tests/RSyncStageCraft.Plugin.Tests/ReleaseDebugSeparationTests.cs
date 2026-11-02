@@ -12,8 +12,9 @@ namespace RSyncStageCraft.Tests;
 /// The plugin holds no user-reachable development tooling in any build: no
 /// Debug Tools window type, no self-test controller instance or registration,
 /// no spike UI, no button and no invocation path, even when Dalamud loads it as
-/// a dev plugin. A Debug build (RSC_DEVELOPMENT) differs from a Release build
-/// only in the development diagnostics the actor host logs.
+/// a dev plugin. A Debug build (RSC_DEVELOPMENT) loaded as a dev plugin
+/// differs from a Release build only in the development diagnostics the actor
+/// host logs and in capturing skeleton groups for preview (never uploaded).
 ///
 /// Every test runs in both CI jobs, so absence is checked in both builds.
 /// </summary>
@@ -110,6 +111,25 @@ public sealed class ReleaseDebugSeparationTests
         Assert.Contains(callers, caller => caller.Type == "RSyncStageCraft.PluginConnection" && caller.Name == ".ctor");
     }
 
+    [Fact]
+    public void OnlyTheProductionCompositionSetsTheCaptureOptions()
+    {
+        // The capture options turn skeleton groups on. The plugin builds them
+        // once, from DevelopmentBuild.ToolsEnabled, and nothing else in the
+        // plugin constructs, copies or sets them. Calls into the Client
+        // assembly are member references to type references, which Callers
+        // does not resolve, so they are read through ReferenceCallers.
+        const string options = "RSyncStageCraft.Core.Appearance.AppearanceCaptureOptions";
+        var callers = Plugin.ReferenceCallers(target => target.Type == options &&
+            target.Name is ".ctor" or "set_AllowSkeletonGroups" or "set_AllowDeformer" or "<Clone>$").ToArray();
+        Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") }, callers);
+        Assert.Contains(new MethodName("RSyncStageCraft.PluginConnection", ".ctor"),
+            Plugin.ReferenceCallers(target => target.Type == options && target.Name == ".ctor"));
+        // The reader's race switch is passed from the same options, in the same place.
+        Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == "RSyncStageCraft.Core.Appearance.GameAppearanceCaptureReader" && target.Name == ".ctor"));
+    }
+
     [Theory]
     [InlineData("Debug tools")]
     [InlineData("self-test")]
@@ -130,6 +150,7 @@ public sealed class ReleaseDebugSeparationTests
             .ToDictionary(code => code.Value);
 
         private readonly List<(MethodName Method, MethodName[] Calls)> bodies = [];
+        private readonly List<(MethodName Method, MethodName[] Calls)> referenceBodies = [];
         private readonly HashSet<string> types = new(StringComparer.Ordinal);
         private readonly HashSet<MethodName> methods = [];
         private readonly Dictionary<MethodName, string> fields = [];
@@ -164,7 +185,11 @@ public sealed class ReleaseDebugSeparationTests
                     var name = new MethodName(typeName, reader.GetString(method.Name));
                     methods.Add(name);
                     if (method.RelativeVirtualAddress != 0)
-                        bodies.Add((name, Calls(reader, pe.GetMethodBody(method.RelativeVirtualAddress).GetILBytes()!)));
+                    {
+                        var il = pe.GetMethodBody(method.RelativeVirtualAddress).GetILBytes()!;
+                        bodies.Add((name, Calls(reader, il, Resolve)));
+                        referenceBodies.Add((name, Calls(reader, il, ResolveWithReferences)));
+                    }
                 }
             }
         }
@@ -183,7 +208,15 @@ public sealed class ReleaseDebugSeparationTests
         public IEnumerable<MethodName> Callers(Func<MethodName, bool> target) =>
             bodies.Where(body => body.Calls.Any(target)).Select(body => body.Method).Distinct();
 
-        private static MethodName[] Calls(MetadataReader reader, byte[] il)
+        /// <summary>
+        /// As <see cref="Callers"/>, but a call into another assembly (a member
+        /// reference whose parent is a type reference) is also resolved, by
+        /// namespace and name.
+        /// </summary>
+        public IEnumerable<MethodName> ReferenceCallers(Func<MethodName, bool> target) =>
+            referenceBodies.Where(body => body.Calls.Any(target)).Select(body => body.Method).Distinct();
+
+        private static MethodName[] Calls(MetadataReader reader, byte[] il, Func<MetadataReader, EntityHandle, MethodName?> resolve)
         {
             var calls = new List<MethodName>();
             var offset = 0;
@@ -197,7 +230,7 @@ public sealed class ReleaseDebugSeparationTests
                 {
                     case OperandType.InlineMethod:
                         var token = BitConverter.ToInt32(il, offset);
-                        if (Resolve(reader, MetadataTokens.EntityHandle(token)) is { } called)
+                        if (resolve(reader, MetadataTokens.EntityHandle(token)) is { } called)
                             calls.Add(called);
                         offset += 4;
                         break;
@@ -244,6 +277,31 @@ public sealed class ReleaseDebugSeparationTests
                 default:
                     return null;
             }
+        }
+
+        private static MethodName? ResolveWithReferences(MetadataReader reader, EntityHandle handle)
+        {
+            switch (handle.Kind)
+            {
+                case HandleKind.MethodSpecification:
+                    return ResolveWithReferences(reader, reader.GetMethodSpecification((MethodSpecificationHandle)handle).Method);
+                case HandleKind.MemberReference:
+                    var member = reader.GetMemberReference((MemberReferenceHandle)handle);
+                    return member.Parent.Kind == HandleKind.TypeReference
+                        ? new(TypeName(reader, (TypeReferenceHandle)member.Parent), reader.GetString(member.Name))
+                        : Resolve(reader, handle);
+                default:
+                    return Resolve(reader, handle);
+            }
+        }
+
+        private static string TypeName(MetadataReader reader, TypeReferenceHandle handle)
+        {
+            var type = reader.GetTypeReference(handle);
+            var name = reader.GetString(type.Name);
+            return type.ResolutionScope.Kind == HandleKind.TypeReference
+                ? TypeName(reader, (TypeReferenceHandle)type.ResolutionScope) + "+" + name
+                : (type.Namespace.IsNil ? "" : reader.GetString(type.Namespace) + ".") + name;
         }
 
         private static string TypeName(MetadataReader reader, TypeDefinitionHandle handle)

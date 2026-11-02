@@ -409,6 +409,83 @@ public sealed class AppearanceCaptureReaderTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task TheRaceIsNeverReadUnlessSkeletonGroupsAreOn()
+    {
+        var locator = new FakeLocator(Player);
+        var reader = new GameAppearanceCaptureReader(new FrameworkDispatcher(), locator, new FakeIpc());
+
+        var read = await reader.ReadCurrentCharacterAsync(CancellationToken.None);
+
+        Assert.Equal(AppearanceReadStatus.Ok, read.Status);
+        Assert.Null(read.Value!.CharacterRace);
+        Assert.Equal(0, locator.RaceReads);
+    }
+
+    [Fact]
+    public async Task WithSkeletonGroupsTheRaceIsReadOnTheFrameworkBetweenIdentityChecks()
+    {
+        var ipc = new FakeIpc();
+        var locator = new FakeLocator(Player);
+        var dispatcher = new FrameworkDispatcher();
+        var reader = new GameAppearanceCaptureReader(dispatcher, locator, ipc, readCharacterRace: true);
+
+        var read = await reader.ReadCurrentCharacterAsync(CancellationToken.None);
+
+        Assert.Equal(AppearanceReadStatus.Ok, read.Status);
+        Assert.Equal(new AppearanceCharacterRace(8, 15, 1), read.Value!.CharacterRace);
+        Assert.Equal(1, locator.RaceReads);
+        Assert.True(locator.RaceOnFramework);
+        // After the checks around the resource paths, in the same single framework callback.
+        Assert.Equal(3, locator.ChecksBeforeRace);
+        Assert.Equal(1, dispatcher.Invocations);
+        // No IPC call is added.
+        Assert.Equal(new[] { "PenumbraState", "GlamourerState", "GetModDirectory", "GetGameObjectResourcePaths", "GetStateBase64" }, ipc.Calls);
+    }
+
+    [Fact]
+    public async Task APlayerReplacedWhileTheRaceIsReadFailsTheRead()
+    {
+        var ipc = new FakeIpc();
+        var locator = new FakeLocator(Player);
+        locator.AfterRace = () => locator.Current = Player with { GameObjectId = 0x2000 };
+        var reader = new GameAppearanceCaptureReader(new FrameworkDispatcher(), locator, ipc, readCharacterRace: true);
+
+        var read = await reader.ReadCurrentCharacterAsync(CancellationToken.None);
+
+        Assert.Equal(AppearanceReadStatus.PlayerNotFound, read.Status);
+        Assert.Null(read.Value);
+        Assert.DoesNotContain("GetStateBase64", ipc.Calls);
+    }
+
+    [Fact]
+    public async Task AMissingRaceIsNotAReadFailure()
+    {
+        var locator = new FakeLocator(Player) { Race = null };
+        var reader = new GameAppearanceCaptureReader(new FrameworkDispatcher(), locator, new FakeIpc(), readCharacterRace: true);
+
+        var read = await reader.ReadCurrentCharacterAsync(CancellationToken.None);
+
+        Assert.Equal(AppearanceReadStatus.Ok, read.Status);
+        Assert.Null(read.Value!.CharacterRace);
+        Assert.Equal(1, locator.RaceReads);
+    }
+
+    [Fact]
+    public async Task SavedDesignsNeverReadTheRace()
+    {
+        var ipc = new FakeIpc();
+        var id = Guid.NewGuid();
+        ipc.Designs = new() { [id] = "Synthetic design" };
+        var locator = new FakeLocator(Player);
+        var reader = new GameAppearanceCaptureReader(new FrameworkDispatcher(), locator, ipc, readCharacterRace: true);
+
+        await reader.ListDesignsAsync(CancellationToken.None);
+        await reader.ReadDesignAsync(new AppearanceDesignEntry(id, "Synthetic design"), CancellationToken.None);
+
+        Assert.Equal(0, locator.RaceReads);
+    }
+
     /// <summary>Runs the call inline, marking it as on the framework thread.</summary>
     private sealed class FrameworkDispatcher : IGameThreadDispatcher
     {
@@ -453,6 +530,27 @@ public sealed class AppearanceCaptureReaderTests : IDisposable
         }
 
         public bool IsStill(AppearancePlayer candidate) => checks++ < StillAfter && Current == candidate;
+
+        public AppearanceCharacterRace? Race { get; set; } = new(8, 15, 1);
+
+        public int RaceReads { get; private set; }
+
+        public bool RaceOnFramework { get; private set; } = true;
+
+        /// <summary>The number of IsStill checks made before the race was read.</summary>
+        public int ChecksBeforeRace { get; private set; } = -1;
+
+        public Action? AfterRace { get; set; }
+
+        public AppearanceCharacterRace? CharacterRace(AppearancePlayer candidate)
+        {
+            RaceReads++;
+            RaceOnFramework &= FrameworkDispatcher.OnFramework;
+            ChecksBeforeRace = checks;
+            var race = Current == candidate ? Race : null;
+            AfterRace?.Invoke();
+            return race;
+        }
     }
 
     private sealed class FakeIpc : IAppearanceIpc

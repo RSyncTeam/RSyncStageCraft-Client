@@ -1,3 +1,4 @@
+using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using RSyncStageCraft.Core.Appearance;
@@ -28,6 +29,23 @@ internal sealed class DalamudAppearancePlayerLocator(IObjectTable objects) : IAp
         local.Address == player.Address && local.ObjectIndex == player.ObjectIndex && local.GameObjectId == player.GameObjectId &&
         objects[player.ObjectIndex] is { } atIndex &&
         atIndex.Address == player.Address && atIndex.GameObjectId == player.GameObjectId;
+
+    /// <summary>
+    /// The race, clan and gender bytes of the player's customize data
+    /// (<c>DrawData.CustomizeData</c>, the data Penumbra's resource tree
+    /// reads), only while it is still that exact object. Read only; nothing
+    /// is decoded beyond these three bytes.
+    /// </summary>
+    public AppearanceCharacterRace? CharacterRace(AppearancePlayer player)
+    {
+        if (!IsStill(player) || objects.LocalPlayer is not { } local)
+            return null;
+        var customize = local.Customize;
+        if (customize.Length <= (int)CustomizeIndex.Tribe)
+            return null;
+        return new AppearanceCharacterRace(
+            customize[(int)CustomizeIndex.Race], customize[(int)CustomizeIndex.Tribe], customize[(int)CustomizeIndex.Gender]);
+    }
 }
 
 /// <summary>

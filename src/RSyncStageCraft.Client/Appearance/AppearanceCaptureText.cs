@@ -130,6 +130,10 @@ public static class AppearanceCaptureText
             warnings.Add($"{Count(plan.SwappedPaths, "Penumbra file swap")} to other game files {(plan.SwappedPaths == 1 ? "is" : "are")} not included.");
         if (plan.Excluded.Count > 0)
             warnings.Add($"{Count(plan.Excluded.Count, "file")} could not be included (see the list of excluded files).");
+        if (SkeletonGroup(plan) is { } group)
+            warnings.Add(group);
+        if (plan.PreviewOnly)
+            warnings.Add("This capture includes a skeleton group. It can be reviewed in this development build, but uploading it is not enabled yet.");
         if (plan.Source == AppearanceCaptureSource.CurrentCharacter)
             warnings.Add("Penumbra reports the files loaded at your character's last redraw. If you changed mods since, redraw in Penumbra and capture again.");
         return warnings;
@@ -149,6 +153,55 @@ public static class AppearanceCaptureText
         _ => "This appearance cannot be captured.",
     };
 
+    /// <summary>The skeleton group line, or null when there is nothing to say (always, unless skeleton groups may be captured).</summary>
+    public static string? SkeletonGroup(AppearanceCapturePlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        var group = plan.SkeletonGroup;
+        switch (group.State)
+        {
+            case AppearanceSkeletonGroupState.Captured:
+                return FormattableString.Invariant($"Skeleton group for race c{group.RaceCode:D4}: {Count(group.Members, "file")}, captured together.");
+            case AppearanceSkeletonGroupState.Refused:
+                return "Skeleton group not captured: " + SkeletonGroupReason(group) +
+                    (group.GamePath is { } path ? " (" + path + ")" : string.Empty) +
+                    ". None of its files is included, and the skeleton changes will not be reproduced.";
+        }
+        return plan.UnsupportedSkeletonDependencies.Count > 0
+            ? "Skeleton data this build cannot share is in use and will not be reproduced (" + string.Join(", ", plan.UnsupportedSkeletonDependencies) + ")."
+            : null;
+    }
+
+    /// <summary>Why a skeleton group was refused, in words.</summary>
+    public static string SkeletonGroupReason(AppearanceSkeletonGroupOutcome group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        return group.Reason switch
+        {
+            AppearanceSkeletonGroupReason.TooManyMembers => $"more than {SkeletonResourceGroupAssembler.MaximumMembers} skeleton files",
+            AppearanceSkeletonGroupReason.UnsupportedDependency => "it depends on skeleton data this build cannot share",
+            AppearanceSkeletonGroupReason.SwappedMember => "a skeleton file is swapped to another game file, which is never shared",
+            AppearanceSkeletonGroupReason.DeformerNotAllowed => "the bone deformer cannot be shared by this build",
+            AppearanceSkeletonGroupReason.RaceUnknown => "your character's race, clan and gender could not be read",
+            AppearanceSkeletonGroupReason.RaceUnconfirmed => "Penumbra did not report one base skeleton for your character, so its race could not be confirmed",
+            AppearanceSkeletonGroupReason.RaceMismatch => "Penumbra's base skeleton is for a different race than your character's; redraw and capture again",
+            AppearanceSkeletonGroupReason.MemberOutsideModDirectory => "a skeleton file is not inside your Penumbra mod folder",
+            AppearanceSkeletonGroupReason.MemberExtensionMismatch => "a skeleton file's type does not match its game path",
+            AppearanceSkeletonGroupReason.MemberUnreadable => "a skeleton file could not be read",
+            AppearanceSkeletonGroupReason.MemberEmpty => "a skeleton file is empty",
+            AppearanceSkeletonGroupReason.MemberTooLarge => "a skeleton file is larger than 4 MiB",
+            AppearanceSkeletonGroupReason.Invalid => group.Assembly switch
+            {
+                SkeletonGroupRefusal.Structure => "a skeleton file is not a valid file of its type",
+                SkeletonGroupRefusal.RaceMismatch => "a skeleton file is for a race your character cannot use",
+                SkeletonGroupRefusal.InconsistentSlot => "a skeleton and its physics file do not belong together",
+                SkeletonGroupRefusal.MoreThanOneGroup => "the files form more than one skeleton",
+                _ => "the skeleton files do not form one valid group",
+            },
+            _ => "the skeleton files could not be checked",
+        };
+    }
+
     public static string Exclusion(AppearanceCaptureExclusion reason) => reason switch
     {
         AppearanceCaptureExclusion.TypeNotAllowed => "file type not shared (only .mdl, .mtrl and .tex)",
@@ -158,6 +211,8 @@ public static class AppearanceCaptureText
         AppearanceCaptureExclusion.TooLarge => "file is larger than 64 MiB",
         AppearanceCaptureExclusion.OutsideModDirectory => "file is not inside your Penumbra mod folder",
         AppearanceCaptureExclusion.ExtensionMismatch => "file type does not match the game path",
+        AppearanceCaptureExclusion.SkeletonGroupRefused => "skeleton file not included: its skeleton group was not captured",
+        AppearanceCaptureExclusion.UnsupportedSkeletonDependency => "skeleton data this build cannot share",
         _ => "not included",
     };
 

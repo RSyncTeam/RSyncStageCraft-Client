@@ -21,6 +21,13 @@ public interface IAppearancePlayerLocator
     /// index still resolves to that exact object.
     /// </summary>
     bool IsStill(AppearancePlayer player);
+
+    /// <summary>
+    /// The race, clan and gender bytes of <paramref name="player"/>'s customize
+    /// data, only while it is still that exact object; otherwise null. Read
+    /// only when skeleton groups may be captured.
+    /// </summary>
+    AppearanceCharacterRace? CharacterRace(AppearancePlayer player) => null;
 }
 
 public enum AppearanceApiState
@@ -96,12 +103,18 @@ public sealed class GameAppearanceCaptureReader : IAppearanceCaptureReader
     private readonly IAppearancePlayerLocator locator;
     private readonly IAppearanceIpc ipc;
     private readonly Func<bool> unloading;
+    private readonly bool readCharacterRace;
 
     /// <param name="unloading">
     /// True once the plugin is unloading: the dispatcher may then run work
     /// inline on any thread, so no IPC call is made at all.
     /// </param>
-    public GameAppearanceCaptureReader(IGameThreadDispatcher dispatcher, IAppearancePlayerLocator locator, IAppearanceIpc ipc, Func<bool>? unloading = null)
+    /// <param name="readCharacterRace">
+    /// Also read the player's race, clan and gender (skeleton groups only).
+    /// False: the read is exactly as before and the race is never read.
+    /// </param>
+    public GameAppearanceCaptureReader(
+        IGameThreadDispatcher dispatcher, IAppearancePlayerLocator locator, IAppearanceIpc ipc, Func<bool>? unloading = null, bool readCharacterRace = false)
     {
         ArgumentNullException.ThrowIfNull(dispatcher);
         ArgumentNullException.ThrowIfNull(locator);
@@ -110,6 +123,7 @@ public sealed class GameAppearanceCaptureReader : IAppearanceCaptureReader
         this.locator = locator;
         this.ipc = ipc;
         this.unloading = unloading ?? (() => false);
+        this.readCharacterRace = readCharacterRace;
     }
 
     public Task<AppearanceReadResult<AppearanceCaptureRead>> ReadCurrentCharacterAsync(CancellationToken cancellationToken) =>
@@ -130,6 +144,16 @@ public sealed class GameAppearanceCaptureReader : IAppearanceCaptureReader
 
             if (!locator.IsStill(player))
                 return new(AppearanceReadStatus.PlayerNotFound);
+            // The race the skeleton paths were resolved for, read in the same
+            // framework callback (skeleton groups only). Missing is not a read
+            // failure: only a group would be refused.
+            AppearanceCharacterRace? race = null;
+            if (readCharacterRace)
+            {
+                race = locator.CharacterRace(player);
+                if (!locator.IsStill(player))
+                    return new(AppearanceReadStatus.PlayerNotFound);
+            }
             var (code, state) = ipc.GetStateBase64(player.ObjectIndex);
             if (!locator.IsStill(player))
                 return new(AppearanceReadStatus.PlayerNotFound);
@@ -149,7 +173,7 @@ public sealed class GameAppearanceCaptureReader : IAppearanceCaptureReader
                 resources.Add(new AppearanceResourceEntry(actual, gamePaths.ToArray()));
             }
             return new(AppearanceReadStatus.Ok, new AppearanceCaptureRead(
-                AppearanceCaptureSource.CurrentCharacter, state, resources, null, modDirectory, player));
+                AppearanceCaptureSource.CurrentCharacter, state, resources, null, modDirectory, player, CharacterRace: race));
         }, ValidateGlamourerData, cancellationToken);
 
     public Task<AppearanceReadResult<IReadOnlyList<AppearanceDesignEntry>>> ListDesignsAsync(CancellationToken cancellationToken) =>

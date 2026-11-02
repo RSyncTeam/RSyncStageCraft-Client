@@ -160,12 +160,18 @@ internal sealed class PluginConnection
         {
             var appearanceCache = new AppearanceBlobCache(paths.AppearanceCacheDirectory);
             var appearanceTransfer = new AppearanceTransferClient(CurrentSettings, appearanceCache);
+            // Skeleton groups: a Debug build loaded as a dev plugin only, and
+            // preview only. DevelopmentBuild.Enabled is a constant false in
+            // Release, so a Release build never captures one.
+            var skeletonGroups = DevelopmentBuild.ToolsEnabled(pluginInterface.IsDev);
+            var captureOptions = new AppearanceCaptureOptions(AllowSkeletonGroups: skeletonGroups, AllowDeformer: skeletonGroups);
             Appearance = new AppearanceAuthoring(
                 new GameAppearanceCaptureReader(dispatcher, new DalamudAppearancePlayerLocator(objects), new DalamudAppearanceIpc(pluginInterface),
-                    () => dispatcher.IsUnloading),
+                    () => dispatcher.IsUnloading, captureOptions.AllowSkeletonGroups),
                 appearanceTransfer,
                 () => Service.SelfUserId,
-                appearanceCache.TemporaryDirectory);
+                appearanceCache.TemporaryDirectory,
+                captureOptions);
             // "Make a Copy": a local Glamourer design from another member's
             // published entry; only Glamourer.AddDesign and the read-only
             // design list are bound.
