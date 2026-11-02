@@ -93,13 +93,17 @@ public sealed class AppearanceAuthoring
     private readonly AppearanceTransferClient client;
     private readonly Func<RscUserId?> owner;
     private readonly string workingDirectory;
+    private readonly AppearanceCaptureOptions options;
 
-    public AppearanceAuthoring(IAppearanceCaptureReader reader, AppearanceTransferClient client, Func<RscUserId?> owner, string workingDirectory)
+    /// <param name="options">What a capture may include; null is <see cref="AppearanceCaptureOptions.Default"/>.</param>
+    public AppearanceAuthoring(
+        IAppearanceCaptureReader reader, AppearanceTransferClient client, Func<RscUserId?> owner, string workingDirectory, AppearanceCaptureOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(reader);
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
+        this.options = options ?? AppearanceCaptureOptions.Default;
         this.reader = reader;
         this.client = client;
         this.owner = owner;
@@ -148,6 +152,9 @@ public sealed class AppearanceAuthoring
         // or file content invalidates the summary; nothing is uploaded.
         if (await StillSameAsync(plan, cancellationToken).ConfigureAwait(false) is { } changed)
             return new(new(changed));
+        // A skeleton group (format 2) is preview only: refused here, before any request.
+        if (plan.PreviewOnly)
+            return new(new(AppearanceTransferStatus.SkeletonGroupUploadNotEnabled));
         var uploaded = await client.UploadBundleAsync(manifest, plan.Sources, target.Replaces, cancellationToken, phase).ConfigureAwait(false);
         if (!uploaded.Succeeded)
             return new(uploaded);
@@ -191,7 +198,7 @@ public sealed class AppearanceAuthoring
             return AppearanceTransferStatus.CaptureChanged;
         // The same mapping can still point at changed files: plan again (hashing
         // every file) and require the identical bundle.
-        using var fresh = await Task.Run(() => AppearanceCapturePlanner.PlanAsync(self, again, workingDirectory, cancellationToken, ReserveWorkingFileAsync), cancellationToken)
+        using var fresh = await Task.Run(() => AppearanceCapturePlanner.PlanAsync(self, again, workingDirectory, cancellationToken, ReserveWorkingFileAsync, options), cancellationToken)
             .ConfigureAwait(false);
         // No room for the re-check's working file is not a changed appearance.
         if (fresh.Refusal == AppearanceCaptureRefusal.CacheFull)
@@ -206,7 +213,11 @@ public sealed class AppearanceAuthoring
     /// <summary>A saved design never carries Penumbra files, whatever a reader returned.</summary>
     private static AppearanceCaptureRead Normalize(AppearanceCaptureRead read, AppearanceCaptureSource source, string? designName, Guid? designId) =>
         source == AppearanceCaptureSource.SavedDesign
-            ? read with { Source = AppearanceCaptureSource.SavedDesign, Resources = [], DesignName = designName, DesignId = designId, PenumbraModDirectory = null, Player = null }
+            ? read with
+            {
+                Source = AppearanceCaptureSource.SavedDesign, Resources = [], DesignName = designName, DesignId = designId, PenumbraModDirectory = null, Player = null,
+                CharacterRace = null,
+            }
             : read;
 
     public static bool IsValidName(string? name) =>
@@ -220,7 +231,7 @@ public sealed class AppearanceAuthoring
         if (owner() is not { IsValid: true } self)
             return new(AppearanceReadStatus.Unavailable);
         // Hashing runs off the framework thread.
-        var plan = await Task.Run(() => AppearanceCapturePlanner.PlanAsync(self, read.Value!, workingDirectory, cancellationToken, ReserveWorkingFileAsync), cancellationToken)
+        var plan = await Task.Run(() => AppearanceCapturePlanner.PlanAsync(self, read.Value!, workingDirectory, cancellationToken, ReserveWorkingFileAsync, options), cancellationToken)
             .ConfigureAwait(false);
         return new(AppearanceReadStatus.Ok, plan);
     }

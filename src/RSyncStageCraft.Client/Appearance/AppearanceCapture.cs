@@ -37,6 +37,10 @@ public sealed record AppearanceResourceEntry(string ActualPath, IReadOnlyCollect
 /// <param name="PenumbraModDirectory">Penumbra's mod root: only files beneath it may be captured.</param>
 /// <param name="Player">The exact local-player object the snapshot was read from.</param>
 /// <param name="DesignId">The saved design's local id (selection data only; never in the bundle).</param>
+/// <param name="CharacterRace">
+/// The player's race, clan and gender bytes, read only when skeleton groups
+/// may be captured (null otherwise and for a saved design); memory only.
+/// </param>
 public sealed record AppearanceCaptureRead(
     AppearanceCaptureSource Source,
     string GlamourerState,
@@ -44,7 +48,8 @@ public sealed record AppearanceCaptureRead(
     string? DesignName = null,
     string? PenumbraModDirectory = null,
     AppearancePlayer? Player = null,
-    Guid? DesignId = null)
+    Guid? DesignId = null,
+    AppearanceCharacterRace? CharacterRace = null)
 {
     /// <summary>Never local paths, the mod directory or the Glamourer data.</summary>
     public override string ToString() => $"{Source} read ({Resources.Count} resource entries)";
@@ -67,6 +72,70 @@ public enum AppearanceCaptureExclusion
     OutsideModDirectory,
     /// <summary>The local file's extension is not the game path's extension.</summary>
     ExtensionMismatch,
+    /// <summary>A skeleton resource whose skeleton group was refused as a whole (development builds only).</summary>
+    SkeletonGroupRefused,
+    /// <summary>Skeleton data in the human skeleton folder that cannot be shared (development builds only).</summary>
+    UnsupportedSkeletonDependency,
+}
+
+/// <summary>Whether the capture holds a skeleton group.</summary>
+public enum AppearanceSkeletonGroupState
+{
+    /// <summary>No skeleton resource is redirected (always, unless skeleton groups may be captured).</summary>
+    NotPresent,
+    /// <summary>The whole group is in the bundle (manifest format 2).</summary>
+    Captured,
+    /// <summary>The group was refused as a whole; none of its files is in the bundle.</summary>
+    Refused,
+}
+
+/// <summary>Why a skeleton group was refused. No member is ever captured without the others.</summary>
+public enum AppearanceSkeletonGroupReason
+{
+    None,
+    /// <summary>More members than one group may hold.</summary>
+    TooManyMembers,
+    /// <summary>Skeleton data that cannot be shared (for example <c>.skp</c> or <c>.kdb</c>) is redirected or swapped.</summary>
+    UnsupportedDependency,
+    /// <summary>A member is swapped to another game file; swaps are never captured.</summary>
+    SwappedMember,
+    /// <summary>The bone deformer is redirected and may not be shared by this build.</summary>
+    DeformerNotAllowed,
+    /// <summary>The character's race, clan and gender could not be read or are not a playable race.</summary>
+    RaceUnknown,
+    /// <summary>Penumbra reported no base skeleton, or base skeletons of more than one race.</summary>
+    RaceUnconfirmed,
+    /// <summary>Penumbra's base skeleton is for another race than the character's.</summary>
+    RaceMismatch,
+    /// <summary>A member's file is not inside Penumbra's mod directory.</summary>
+    MemberOutsideModDirectory,
+    /// <summary>A member's file type does not match its game path.</summary>
+    MemberExtensionMismatch,
+    /// <summary>A member's file could not be read.</summary>
+    MemberUnreadable,
+    /// <summary>A member's file is empty.</summary>
+    MemberEmpty,
+    /// <summary>A member's file is larger than its role's limit (4 MiB).</summary>
+    MemberTooLarge,
+    /// <summary>The group checks refused it (see <see cref="AppearanceSkeletonGroupOutcome.Assembly"/>).</summary>
+    Invalid,
+}
+
+/// <summary>The skeleton group outcome of a capture. Game paths only: never a local path.</summary>
+public sealed record AppearanceSkeletonGroupOutcome(
+    AppearanceSkeletonGroupState State,
+    AppearanceSkeletonGroupReason Reason = AppearanceSkeletonGroupReason.None,
+    string? GamePath = null,
+    ushort? RaceCode = null,
+    int Members = 0,
+    SkeletonGroupRefusal? Assembly = null,
+    SkeletonStructureProblem? Problem = null)
+{
+    public static AppearanceSkeletonGroupOutcome NotPresent { get; } = new(AppearanceSkeletonGroupState.NotPresent);
+
+    internal static AppearanceSkeletonGroupOutcome Refused(
+        AppearanceSkeletonGroupReason reason, string? gamePath = null, SkeletonGroupRefusal? assembly = null, SkeletonStructureProblem? problem = null) =>
+        new(AppearanceSkeletonGroupState.Refused, reason, gamePath, Assembly: assembly, Problem: problem);
 }
 
 /// <summary>Why a capture cannot be uploaded at all.</summary>
@@ -119,9 +188,13 @@ public sealed class AppearanceCapturePlan : IDisposable
         int swappedPaths,
         string? conflictingGamePath,
         AppearanceCaptureRead read,
-        IDisposable? workingReservation = null)
+        IDisposable? workingReservation = null,
+        AppearanceSkeletonGroupOutcome? skeletonGroup = null,
+        IReadOnlyList<string>? unsupportedSkeletonDependencies = null)
     {
         this.workingReservation = workingReservation;
+        SkeletonGroup = skeletonGroup ?? AppearanceSkeletonGroupOutcome.NotPresent;
+        UnsupportedSkeletonDependencies = unsupportedSkeletonDependencies ?? [];
         Read = read;
         Fingerprint = AppearanceCapturePlanner.Fingerprint(read);
         Source = source;
@@ -158,7 +231,7 @@ public sealed class AppearanceCapturePlan : IDisposable
 
     public long GlamourerStateBytes => Manifest?.Glamourer.Size ?? 0;
 
-    /// <summary>Captured files by type (".mdl", ".mtrl", ".tex").</summary>
+    /// <summary>Captured files by type (".mdl", ".mtrl", ".tex"; skeleton types only in a skeleton group).</summary>
     public IReadOnlyDictionary<string, int> FilesByType =>
         Manifest is null
             ? new Dictionary<string, int>()
@@ -176,6 +249,18 @@ public sealed class AppearanceCapturePlan : IDisposable
 
     /// <summary>The game path served by two different files, when that refused the capture.</summary>
     public string? ConflictingGamePath { get; }
+
+    /// <summary>The skeleton group outcome (always <see cref="AppearanceSkeletonGroupState.NotPresent"/> unless skeleton groups may be captured).</summary>
+    public AppearanceSkeletonGroupOutcome SkeletonGroup { get; }
+
+    /// <summary>Game paths of redirected or swapped skeleton data that cannot be shared (development builds only).</summary>
+    public IReadOnlyList<string> UnsupportedSkeletonDependencies { get; }
+
+    /// <summary>
+    /// The bundle holds a skeleton group (manifest format 2): it may be
+    /// reviewed, but uploading it is not enabled; it is refused locally.
+    /// </summary>
+    public bool PreviewOnly => Manifest is { FormatVersion: AppearanceLimits.SkeletonGroupFormatVersion };
 
     /// <summary>
     /// Penumbra meta changes are never captured (no reviewed schema);
@@ -233,18 +318,38 @@ public static class AppearanceCapturePlanner
     /// refuses the capture with <see cref="AppearanceCaptureRefusal.CacheFull"/>.
     /// The plan holds the reservation until it is disposed.
     /// </param>
+    /// <param name="options">What the capture may include beyond allowlist version 1; null is <see cref="AppearanceCaptureOptions.Default"/>.</param>
     public static async Task<AppearanceCapturePlan> PlanAsync(
         RscUserId owner, AppearanceCaptureRead read, string workingDirectory, CancellationToken cancellationToken = default,
-        Func<long, CancellationToken, Task<IDisposable?>>? reserve = null)
+        Func<long, CancellationToken, Task<IDisposable?>>? reserve = null, AppearanceCaptureOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(read);
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
+        options ??= AppearanceCaptureOptions.Default;
         var excluded = new List<AppearanceCaptureExcluded>();
         var sources = new Dictionary<ContentHash, string>();
         int vanilla = 0, swapped = 0;
+        // Skeleton groups (development builds only): every line that uses
+        // this is skipped when it is false, which is today's capture exactly.
+        var groups = options.AllowSkeletonGroups && read.Source == AppearanceCaptureSource.CurrentCharacter;
+        var skeletonGroup = AppearanceSkeletonGroupOutcome.NotPresent;
+        var unsupported = new SortedSet<string>(StringComparer.Ordinal);
+        var unsupportedLocal = new SortedSet<string>(StringComparer.Ordinal);
 
         AppearanceCapturePlan Refused(AppearanceCaptureRefusal refusal, string? conflict = null, string? working = null) =>
-            new(read.Source, read.DesignName, refusal, null, new Dictionary<ContentHash, string>(), working, excluded, vanilla, swapped, conflict, read);
+            new(read.Source, read.DesignName, refusal, null, new Dictionary<ContentHash, string>(), working, excluded, vanilla, swapped, conflict, read,
+                null, skeletonGroup, [.. unsupported]);
+
+        // The one reported spelling of the bone deformer is mapped to its
+        // canonical path once, before anything below (and so before
+        // conflicts are detected), for vanilla, swapped and local sources
+        // alike. Only under skeleton groups: without them the mixed-case
+        // path keeps failing the game-path contract, as before.
+        var resources = groups ? CanonicalizeReported(read.Resources) : read.Resources;
+        // Under skeleton groups: the local sources of each skeleton resource
+        // path, and the skeleton resource paths served by a swap.
+        var groupLocal = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+        var groupSwapped = new SortedSet<string>(StringComparer.Ordinal);
 
         var state = Encoding.UTF8.GetBytes(read.GlamourerState ?? string.Empty);
         if (state.Length == 0)
@@ -263,7 +368,7 @@ public static class AppearanceCapturePlanner
         var origins = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         if (read.Source == AppearanceCaptureSource.CurrentCharacter)
         {
-            foreach (var entry in read.Resources)
+            foreach (var entry in resources)
             {
                 foreach (var gamePath in entry.GamePaths.Where(path => path is not null))
                 {
@@ -275,7 +380,7 @@ public static class AppearanceCapturePlanner
         }
         if (read.Source == AppearanceCaptureSource.CurrentCharacter)
         {
-            foreach (var entry in read.Resources.OrderBy(entry => entry.ActualPath, StringComparer.Ordinal))
+            foreach (var entry in resources.OrderBy(entry => entry.ActualPath, StringComparer.Ordinal))
             {
                 var gamePaths = entry.GamePaths.Where(path => path is not null).Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToList();
                 if (!IsLocalFile(entry.ActualPath))
@@ -285,16 +390,40 @@ public static class AppearanceCapturePlanner
                         if (string.Equals(gamePath, entry.ActualPath, StringComparison.OrdinalIgnoreCase))
                             vanilla++;
                         else
+                        {
                             swapped++;
+                            // A swapped skeleton resource cannot be reproduced: the group step refuses its group.
+                            if (groups && IsGroupPath(gamePath, out var member))
+                                (member ? groupSwapped : unsupported).Add(gamePath);
+                        }
                     }
                     continue;
                 }
                 var candidates = new List<string>();
                 foreach (var gamePath in gamePaths)
                 {
-                    if (!AppearanceGamePath.IsValid(gamePath))
+                    // Under skeleton groups, the human skeleton folder is checked
+                    // first, so a non-canonical spelling there is still disclosed
+                    // as skeleton data that cannot be shared (a member always
+                    // has a canonical path).
+                    if (groups && IsGroupPath(gamePath, out var member))
+                    {
+                        // Never captured on its own: the group step decides for the whole group.
+                        if (member)
+                        {
+                            if (!groupLocal.TryGetValue(gamePath, out var actuals))
+                                groupLocal[gamePath] = actuals = new SortedSet<string>(StringComparer.Ordinal);
+                            actuals.Add(entry.ActualPath);
+                        }
+                        else
+                        {
+                            unsupported.Add(gamePath);
+                            unsupportedLocal.Add(gamePath);
+                        }
+                    }
+                    else if (!AppearanceGamePath.IsValid(gamePath))
                         excluded.Add(new(gamePath, AppearanceCaptureExclusion.InvalidGamePath));
-                    else if (!AppearanceFileTypes.IsAllowed(gamePath))
+                    else if (!AppearanceFileTypes.IsAllowed(gamePath, groups ? AppearanceFileTypes.Version : 1))
                         excluded.Add(new(gamePath, AppearanceCaptureExclusion.TypeNotAllowed));
                     else
                         candidates.Add(gamePath);
@@ -348,6 +477,34 @@ public static class AppearanceCapturePlanner
             }
         }
 
+        if (groups)
+        {
+            // The whole group, or none of it, before conflicts and limits are
+            // checked: captured members join the mapping exactly as other
+            // captured files do, so the checks below see them.
+            var planned = await PlanSkeletonGroupAsync(
+                read, options, origins.Keys, groupLocal, groupSwapped, unsupported, canonicalOf, hashed, cancellationToken).ConfigureAwait(false);
+            if (planned.Conflict is { } groupConflict)
+                return Refused(AppearanceCaptureRefusal.ConflictingGamePath, groupConflict);
+            skeletonGroup = planned.Outcome;
+            if (planned.Members is { } groupMembers)
+            {
+                foreach (var (memberPath, memberBlob, memberFile) in groupMembers)
+                {
+                    byGamePath[memberPath] = memberBlob;
+                    sources.TryAdd(memberBlob.Hash, memberFile);
+                }
+            }
+            else
+            {
+                // Refused: every path of the group is listed once, and none is captured.
+                excluded.AddRange(groupLocal.Keys.Union(groupSwapped, StringComparer.Ordinal).Order(StringComparer.Ordinal)
+                    .Select(gamePath => new AppearanceCaptureExcluded(gamePath, AppearanceCaptureExclusion.SkeletonGroupRefused)));
+            }
+            excluded.AddRange(unsupportedLocal
+                .Select(gamePath => new AppearanceCaptureExcluded(gamePath, AppearanceCaptureExclusion.UnsupportedSkeletonDependency)));
+        }
+
         // A game path served by more than one source is a conflicting mapping
         // unless every source is a captured local file with the same content
         // (identical files count once). A mix with a vanilla, swapped or
@@ -371,7 +528,8 @@ public static class AppearanceCapturePlanner
             return Refused(AppearanceCaptureRefusal.BundleTooLarge);
 
         var manifest = AppearanceBundleManifest.TryCreate(owner, glamourer, null, null,
-            byGamePath.Select(pair => new AppearanceFileEntry(pair.Key, pair.Value)), out _);
+            byGamePath.Select(pair => new AppearanceFileEntry(pair.Key, pair.Value)),
+            skeletonGroup.State == AppearanceSkeletonGroupState.Captured ? skeletonGroup.RaceCode : null, out _);
         if (manifest is null)
             return Refused(AppearanceCaptureRefusal.InvalidManifest);
 
@@ -409,7 +567,190 @@ public static class AppearanceCapturePlanner
             throw;
         }
         sources.TryAdd(glamourer.Hash, working);
-        return new(read.Source, read.DesignName, AppearanceCaptureRefusal.None, manifest, sources, working, excluded, vanilla, swapped, null, read, reservation);
+        return new(read.Source, read.DesignName, AppearanceCaptureRefusal.None, manifest, sources, working, excluded, vanilla, swapped, null, read, reservation,
+            skeletonGroup, [.. unsupported]);
+    }
+
+    /// <summary>The one alias, applied to every reported game path (vanilla, swapped and local sources alike).</summary>
+    private static IReadOnlyList<AppearanceResourceEntry> CanonicalizeReported(IReadOnlyList<AppearanceResourceEntry> resources) =>
+        resources.Select(entry => entry with
+        {
+            GamePaths = entry.GamePaths.Select(path => SkeletonResourcePaths.TryCanonicalizeReported(path, out var canonical) ? canonical : path).ToArray(),
+        }).ToList();
+
+    private const string HumanFolder = "chara/human/c";
+    private const string SkeletonFolder = "/skeleton/";
+
+    /// <summary>
+    /// A skeleton group path: a recognised skeleton resource
+    /// (<paramref name="member"/> true), or any other path in a human
+    /// skeleton folder, <c>chara/human/cRRRR/skeleton/</c>, which is skeleton
+    /// data that cannot be shared (<paramref name="member"/> false).
+    /// </summary>
+    internal static bool IsGroupPath(string gamePath, out bool member)
+    {
+        member = SkeletonResourcePaths.TryClassify(gamePath, out _);
+        if (member)
+            return true;
+        return gamePath.Length > HumanFolder.Length + 4 + SkeletonFolder.Length &&
+            gamePath.StartsWith(HumanFolder, StringComparison.Ordinal) &&
+            gamePath.AsSpan(HumanFolder.Length, 4).IndexOfAnyExceptInRange('0', '9') < 0 &&
+            gamePath.AsSpan(HumanFolder.Length + 4).StartsWith(SkeletonFolder, StringComparison.Ordinal);
+    }
+
+    private sealed record SkeletonGroupPlan(
+        AppearanceSkeletonGroupOutcome Outcome,
+        IReadOnlyList<(string GamePath, AppearanceBlobRef Blob, string Canonical)>? Members = null,
+        string? Conflict = null);
+
+    /// <summary>
+    /// The skeleton group, all or nothing. The required set is every
+    /// skeleton resource path served by a non-vanilla source. Cheap checks
+    /// run first; then each local member is read once, within its role's
+    /// limit, and those same bytes are checked and hashed. Captured members
+    /// are recorded in <paramref name="canonicalOf"/> and
+    /// <paramref name="hashed"/> so the conflict check treats them like any
+    /// other captured file.
+    /// </summary>
+    private static async Task<SkeletonGroupPlan> PlanSkeletonGroupAsync(
+        AppearanceCaptureRead read,
+        AppearanceCaptureOptions options,
+        IEnumerable<string> reportedGamePaths,
+        SortedDictionary<string, SortedSet<string>> local,
+        SortedSet<string> swappedMembers,
+        SortedSet<string> unsupported,
+        Dictionary<string, string> canonicalOf,
+        Dictionary<string, (AppearanceBlobRef? Blob, AppearanceCaptureExclusion? Problem)> hashed,
+        CancellationToken cancellationToken)
+    {
+        var required = local.Keys.Union(swappedMembers, StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
+        if (required.Count == 0)
+            return new(AppearanceSkeletonGroupOutcome.NotPresent);
+        static SkeletonGroupPlan Refuse(AppearanceSkeletonGroupReason reason, string? gamePath = null, SkeletonGroupRefusal? assembly = null, SkeletonStructureProblem? problem = null) =>
+            new(AppearanceSkeletonGroupOutcome.Refused(reason, gamePath, assembly, problem));
+
+        // Checked before any file is read.
+        if (required.Count > SkeletonResourceGroupAssembler.MaximumMembers)
+            return Refuse(AppearanceSkeletonGroupReason.TooManyMembers);
+        if (unsupported.Count > 0)
+            return Refuse(AppearanceSkeletonGroupReason.UnsupportedDependency, unsupported.Min);
+        if (swappedMembers.Count > 0)
+            return Refuse(AppearanceSkeletonGroupReason.SwappedMember, swappedMembers.Min);
+        if (!options.AllowDeformer && required.Contains(SkeletonResourcePaths.DeformerGamePath, StringComparer.Ordinal))
+            return Refuse(AppearanceSkeletonGroupReason.DeformerNotAllowed, SkeletonResourcePaths.DeformerGamePath);
+        switch (AppearanceRaceCodes.Confirm(read.CharacterRace, reportedGamePaths, out var raceCode))
+        {
+            case AppearanceRaceCheck.Unknown:
+                return Refuse(AppearanceSkeletonGroupReason.RaceUnknown);
+            case AppearanceRaceCheck.Unconfirmed:
+                return Refuse(AppearanceSkeletonGroupReason.RaceUnconfirmed);
+            case AppearanceRaceCheck.Mismatch:
+                return Refuse(AppearanceSkeletonGroupReason.RaceMismatch);
+        }
+
+        // Each member's local sources: contained, of the right type, and read
+        // once within the role's limit. Identical copies count once; two
+        // different contents for one path refuse the whole capture.
+        var candidates = new List<SkeletonGroupCandidate>(required.Count);
+        var chosen = new Dictionary<string, string>(StringComparer.Ordinal);
+        var canonicalFor = new Dictionary<string, string>(StringComparer.Ordinal);
+        var bytesOf = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var gamePath in required)
+        {
+            SkeletonResourcePaths.TryClassify(gamePath, out var path);
+            byte[]? content = null;
+            string? contentFile = null;
+            foreach (var actual in local[gamePath])
+            {
+                if (ContainedFile(read.PenumbraModDirectory, actual) is not { } canonical)
+                    return Refuse(AppearanceSkeletonGroupReason.MemberOutsideModDirectory, gamePath);
+                canonicalFor[actual] = canonical;
+                if (!string.Equals(Path.GetExtension(canonical), Path.GetExtension(gamePath), StringComparison.OrdinalIgnoreCase))
+                    return Refuse(AppearanceSkeletonGroupReason.MemberExtensionMismatch, gamePath);
+                if (!bytesOf.TryGetValue(canonical, out var bytes))
+                {
+                    var (data, problem) = await ReadBoundedAsync(canonical, SkeletonResourceValidation.MaximumBytes(path.Role), cancellationToken).ConfigureAwait(false);
+                    switch (problem)
+                    {
+                        case AppearanceCaptureExclusion.Empty:
+                            return Refuse(AppearanceSkeletonGroupReason.MemberEmpty, gamePath);
+                        case AppearanceCaptureExclusion.TooLarge:
+                            return Refuse(AppearanceSkeletonGroupReason.MemberTooLarge, gamePath, problem: SkeletonStructureProblem.TooLarge);
+                        case not null:
+                            return Refuse(AppearanceSkeletonGroupReason.MemberUnreadable, gamePath);
+                    }
+                    bytesOf[canonical] = bytes = data!;
+                }
+                if (content is null)
+                {
+                    content = bytes;
+                    contentFile = canonical;
+                }
+                else if (!content.AsSpan().SequenceEqual(bytes))
+                    return new(AppearanceSkeletonGroupOutcome.NotPresent, Conflict: gamePath);
+            }
+            candidates.Add(new SkeletonGroupCandidate(gamePath, content!));
+            chosen[gamePath] = contentFile!;
+        }
+
+        var result = SkeletonResourceGroupAssembler.Assemble(raceCode, required, candidates);
+        if (result.Group is not { } group)
+            return Refuse(AppearanceSkeletonGroupReason.Invalid, result.GamePath, result.Refusal, result.Problem);
+
+        // Accepted: recorded like any other captured file.
+        var members = new List<(string, AppearanceBlobRef, string)>(group.Members.Count);
+        foreach (var member in group.Members)
+        {
+            var gamePath = member.Path.GamePath;
+            foreach (var actual in local[gamePath])
+            {
+                var canonical = canonicalFor[actual];
+                canonicalOf[actual] = canonical;
+                hashed[canonical] = (member.Content, null);
+            }
+            members.Add((gamePath, member.Content, chosen[gamePath]));
+        }
+        return new(new AppearanceSkeletonGroupOutcome(AppearanceSkeletonGroupState.Captured, RaceCode: raceCode, Members: members.Count), members);
+    }
+
+    /// <summary>
+    /// Reads a whole file of at most <paramref name="limit"/> bytes into
+    /// memory: it stops after limit + 1 bytes and never trusts the reported
+    /// length (only used as a first buffer size, growing up to limit + 1).
+    /// Problems are reported without the path.
+    /// </summary>
+    private static async Task<(byte[]? Bytes, AppearanceCaptureExclusion? Problem)> ReadBoundedAsync(string path, long limit, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, BufferBytes,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var cap = checked((int)limit + 1);
+            var buffer = new byte[(int)Math.Clamp(file.Length + 1, 1, cap)];
+            var total = 0;
+            while (true)
+            {
+                if (total == buffer.Length)
+                {
+                    if (buffer.Length == cap)
+                        break;
+                    Array.Resize(ref buffer, (int)Math.Min((long)buffer.Length * 2, cap));
+                }
+                var read = await file.ReadAsync(buffer.AsMemory(total), cancellationToken).ConfigureAwait(false);
+                if (read == 0)
+                    break;
+                total += read;
+            }
+            if (total == 0)
+                return (null, AppearanceCaptureExclusion.Empty);
+            if (total > limit)
+                return (null, AppearanceCaptureExclusion.TooLarge);
+            return (buffer[..total], null);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return (null, AppearanceCaptureExclusion.Unreadable);
+        }
     }
 
     private static void DeleteWorkingFile(string? working)
@@ -469,7 +810,8 @@ public static class AppearanceCapturePlanner
 
     /// <summary>
     /// A canonical digest of a snapshot: the player object, the mod root, the
-    /// sorted mapping and the Glamourer data. Two captures with the same
+    /// sorted mapping, the Glamourer data and, when it was read, the
+    /// character's race. Two captures with the same
     /// digest read the same appearance; memory only, never sent.
     /// </summary>
     internal static string Fingerprint(AppearanceCaptureRead read)
@@ -493,6 +835,9 @@ public static class AppearanceCapturePlanner
                 Add(gamePath);
             Add("\n");
         }
+        // Only when it was read (skeleton groups): a snapshot without it digests exactly as before.
+        if (read.CharacterRace is { } race)
+            Add(FormattableString.Invariant($"characterRace:{race.Race}:{race.Tribe}:{race.Sex}"));
         return Convert.ToHexString(sha.GetHashAndReset());
     }
 
