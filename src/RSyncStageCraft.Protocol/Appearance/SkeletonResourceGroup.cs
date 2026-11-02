@@ -1,13 +1,14 @@
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 
 namespace RSyncStageCraft.Core.Appearance;
 
-// Skeleton-resource groups (human plan stage 2, step SK-P1). This file contains
-// only a pure path classifier, bounded header-and-shape validators and an
-// all-or-nothing group assembler. Nothing calls it yet: capture, transfer,
-// cache, apply and the allowlist (AppearanceFileTypes, version 1) are
-// unchanged, and nothing here is on the wire. It touches no game, plugin,
-// network or disk.
+// Skeleton-resource groups (human plan stage 2, steps SK-P1 and AM4-S1). This
+// file contains only a pure path classifier, the one reported-path alias,
+// bounded header-and-shape validators and an all-or-nothing group assembler.
+// Allowlist v2 and manifest format 2 (AppearanceBundle.cs) use its path rules;
+// nothing else calls it yet: capture, transfer, cache and apply are unchanged,
+// and nothing here is on the wire. It touches no game, plugin, network or disk.
 
 /// <summary>The role a skeleton resource plays in a group.</summary>
 public enum SkeletonResourceRole
@@ -64,6 +65,31 @@ public static class SkeletonResourcePaths
 {
     /// <summary>The one deformer path, in canonical (lowercase) form.</summary>
     public const string DeformerGamePath = "chara/xls/bonedeformer/human.pbd";
+
+    /// <summary>
+    /// The deformer path as Penumbra reports it (mixed case). The only
+    /// reported spelling that is ever mapped to a canonical path (AM-4).
+    /// </summary>
+    public const string ReportedDeformerGamePath = "chara/xls/boneDeformer/human.pbd";
+
+    /// <summary>
+    /// Maps exactly <see cref="ReportedDeformerGamePath"/> (ordinal) to
+    /// <see cref="DeformerGamePath"/> and returns true. Every other input is
+    /// returned unchanged with false: no other path is lowercased or otherwise
+    /// normalized, so it still meets the canonical rules or fails them as before.
+    /// Capture applies this to every reported game path once, before any
+    /// conflict detection (AM-4 corrigendum C8).
+    /// </summary>
+    public static bool TryCanonicalizeReported(string? reportedGamePath, [NotNullWhen(true)] out string? gamePath)
+    {
+        if (string.Equals(reportedGamePath, ReportedDeformerGamePath, StringComparison.Ordinal))
+        {
+            gamePath = DeformerGamePath;
+            return true;
+        }
+        gamePath = reportedGamePath;
+        return false;
+    }
 
     /// <summary>The playable race codes a group may be for (c0101 to c1801; never an NPC code).</summary>
     public static IReadOnlyList<ushort> PlayerRaceCodes { get; } =
@@ -476,25 +502,8 @@ public static class SkeletonResourceGroupAssembler
                 return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.UnexpectedMember, gamePath);
         }
 
-        // One group: at most one skeleton and one physics module per partial slot,
-        // agreeing with each other, and every race code possible for the target.
-        var skeletons = new Dictionary<SkeletonPartialSlot, SkeletonResourcePath>();
-        var physics = new Dictionary<SkeletonPartialSlot, SkeletonResourcePath>();
-        foreach (var (gamePath, (path, _)) in offered)
-        {
-            if (path.Role == SkeletonResourceRole.Deformer)
-                continue;
-            var bySlot = path.Role == SkeletonResourceRole.Skeleton ? skeletons : physics;
-            if (!bySlot.TryAdd(path.Slot, path))
-                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.MoreThanOneGroup, gamePath);
-            if (!RaceFits(targetRaceCode, path))
-                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.RaceMismatch, gamePath);
-        }
-        foreach (var (slot, skeleton) in skeletons)
-        {
-            if (physics.TryGetValue(slot, out var module) && (module.RaceCode != skeleton.RaceCode || module.SetId != skeleton.SetId))
-                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.InconsistentSlot, module.GamePath);
-        }
+        if (CheckOneGroup(targetRaceCode, offered.Values.Select(value => value.Path)) is { } shape)
+            return shape;
 
         // Every member's bytes, checked and hashed; nothing is accepted unless all pass.
         var members = new List<SkeletonGroupMember>(offered.Count);
@@ -505,6 +514,73 @@ public static class SkeletonResourceGroupAssembler
             members.Add(new SkeletonGroupMember(path, new AppearanceBlobRef(ContentHash.Of(content.Span), content.Length)));
         }
         return new SkeletonGroupResult(new SkeletonResourceGroup(targetRaceCode, members), null);
+    }
+
+    /// <summary>
+    /// Checks a group a manifest declares, without its bytes (format 2, AM-4):
+    /// <paramref name="members"/> are the manifest's skeleton-resource entries
+    /// and are the whole group. The same rules as <see cref="Assemble"/> apply
+    /// to the paths (a playable target, at most <see cref="MaximumMembers"/>,
+    /// canonical recognised unique paths, one group, race fit, consistent
+    /// slots), and each declared size must be within the role's limit. The
+    /// bytes are checked wherever they are present, with <see cref="Assemble"/>.
+    /// </summary>
+    public static SkeletonGroupResult AssembleDeclared(ushort targetRaceCode, IReadOnlyList<AppearanceFileEntry> members)
+    {
+        ArgumentNullException.ThrowIfNull(members);
+        if (!SkeletonResourcePaths.IsPlayerRaceCode(targetRaceCode))
+            return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.InvalidTargetRace);
+        if (members.Count == 0)
+            return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.Empty);
+        if (members.Count > MaximumMembers)
+            return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.TooManyMembers);
+
+        var declared = new SortedDictionary<string, (SkeletonResourcePath Path, AppearanceBlobRef Content)>(StringComparer.Ordinal);
+        foreach (var member in members)
+        {
+            if (member is null)
+                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.InvalidGamePath);
+            if (Classify(member.GamePath, out var path) is { } refusal)
+                return SkeletonGroupResult.Refuse(refusal, member.GamePath);
+            if (!declared.TryAdd(member.GamePath, (path, member.Content)))
+                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.DuplicateGamePath, member.GamePath);
+        }
+        if (CheckOneGroup(targetRaceCode, declared.Values.Select(value => value.Path)) is { } shape)
+            return shape;
+        foreach (var (gamePath, (path, content)) in declared)
+        {
+            if (content is not { IsValid: true })
+                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.Structure, gamePath, SkeletonStructureProblem.TooShort);
+            if (content.Size > SkeletonResourceValidation.MaximumBytes(path.Role))
+                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.Structure, gamePath, SkeletonStructureProblem.TooLarge);
+        }
+        var accepted = declared.Values.Select(value => new SkeletonGroupMember(value.Path, value.Content)).ToArray();
+        return new SkeletonGroupResult(new SkeletonResourceGroup(targetRaceCode, accepted), null);
+    }
+
+    // One group: at most one skeleton and one physics module per partial slot,
+    // agreeing with each other, and every race code possible for the target.
+    // The paths arrive sorted by game path; the first failing one is named.
+    private static SkeletonGroupResult? CheckOneGroup(ushort targetRaceCode, IEnumerable<SkeletonResourcePath> paths)
+    {
+        var skeletons = new Dictionary<SkeletonPartialSlot, SkeletonResourcePath>();
+        var physics = new Dictionary<SkeletonPartialSlot, SkeletonResourcePath>();
+        foreach (var path in paths)
+        {
+            if (path.Role == SkeletonResourceRole.Deformer)
+                continue;
+            var bySlot = path.Role == SkeletonResourceRole.Skeleton ? skeletons : physics;
+            if (!bySlot.TryAdd(path.Slot, path))
+                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.MoreThanOneGroup, path.GamePath);
+            if (!RaceFits(targetRaceCode, path))
+                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.RaceMismatch, path.GamePath);
+        }
+        foreach (var (slot, skeleton) in skeletons)
+        {
+            if (physics.TryGetValue(slot, out var module) && (module.RaceCode != skeleton.RaceCode || module.SetId != skeleton.SetId))
+                return SkeletonGroupResult.Refuse(SkeletonGroupRefusal.InconsistentSlot, module.GamePath);
+        }
+        return null;
     }
 
     private static SkeletonGroupRefusal? Classify(string? gamePath, out SkeletonResourcePath path)
