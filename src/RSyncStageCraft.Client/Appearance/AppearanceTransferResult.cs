@@ -65,6 +65,12 @@ public enum AppearanceTransferStatus
     CaptureChanged,
     /// <summary>The capture holds a skeleton group, which can only be previewed; nothing was sent.</summary>
     SkeletonGroupUploadNotEnabled,
+    /// <summary>The bundle's skeleton group holds the bone deformer, which this receiver does not accept; nothing was downloaded.</summary>
+    SkeletonGroupNotAllowed,
+    /// <summary>The bundle's skeleton group is for another race than the character it would be shown on; nothing was downloaded.</summary>
+    SkeletonGroupRaceMismatch,
+    /// <summary>The bundle's skeleton group failed the receiver's own checks; nothing is held.</summary>
+    SkeletonGroupInvalid,
 }
 
 /// <summary>
@@ -117,6 +123,9 @@ public sealed record AppearanceTransferResult(AppearanceTransferStatus Status, s
         AppearanceTransferStatus.CacheOverLimit => "The local appearance cache is over its selected limit, so new downloads are paused until appearances in use are released. Free space on the drive or delete unused appearances.",
         AppearanceTransferStatus.CaptureChanged => "Your appearance changed since the summary. Nothing was sent; capture again.",
         AppearanceTransferStatus.SkeletonGroupUploadNotEnabled => "This capture includes a skeleton group, which can only be previewed in this build. Nothing was sent.",
+        AppearanceTransferStatus.SkeletonGroupNotAllowed => "This appearance includes skeleton data this build does not accept. Nothing was downloaded.",
+        AppearanceTransferStatus.SkeletonGroupRaceMismatch => "This appearance's skeleton data is for another race than this character. Nothing was downloaded.",
+        AppearanceTransferStatus.SkeletonGroupInvalid => "This appearance's skeleton data failed its checks, so none of it is used.",
         _ => "Unknown result.",
     };
 
