@@ -147,6 +147,9 @@ public sealed class AppearanceCacheHeldLease : IDisposable
         }
     }
 
+    /// <summary>Forgets the kept bytes (the handle and the pin stay); <see cref="Bytes"/> is then null.</summary>
+    internal void DropBytes() => Volatile.Write(ref bytes, null);
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref released, 1) != 0)

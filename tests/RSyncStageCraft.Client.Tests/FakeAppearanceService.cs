@@ -41,6 +41,9 @@ internal sealed class FakeAppearanceService(long quotaBytes = long.MaxValue, int
     /// <summary>Answers a request itself (after it is recorded) when it returns a task; null passes it on.</summary>
     public Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>?>? Intercept { get; set; }
 
+    /// <summary>Test-only: commits format-2 manifests (a skeleton group) too. Off by default, as the format-1 server.</summary>
+    public bool AcceptSkeletonGroups { get; set; }
+
     /// <summary>Flips the last byte of a successful blob download when it returns true.</summary>
     public Func<HttpRequestMessage, bool>? Tamper { get; set; }
 
@@ -150,7 +153,8 @@ internal sealed class FakeAppearanceService(long quotaBytes = long.MaxValue, int
 
     private HttpResponseMessage Commit(string account, byte[] body)
     {
-        if (AppearanceBundleManifest.TryParse(body, out _) is not { } manifest || !manifest.CanonicalBytes.AsSpan().SequenceEqual(body))
+        var readOptions = AcceptSkeletonGroups ? AppearanceManifestReadOptions.AllowSkeletonGroups : AppearanceManifestReadOptions.FormatOneOnly;
+        if (AppearanceBundleManifest.TryParse(body, readOptions, out _) is not { } manifest || !manifest.CanonicalBytes.AsSpan().SequenceEqual(body))
             return Error(HttpStatusCode.BadRequest, "invalidManifest");
         if (manifest.OwnerId.Value != account)
             return Error(HttpStatusCode.Forbidden, "notOwner");

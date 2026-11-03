@@ -97,6 +97,9 @@ public sealed class AppearanceTransferClient : IDisposable
     private readonly AppearanceTransferOptions options;
     private readonly HttpClient http;
     private readonly SemaphoreSlim encodeGate = new(1, 1);
+    private readonly object holdGate = new();
+    private readonly HashSet<AppearanceBundleHold> holds = [];
+    private bool disposed;
 
     public AppearanceTransferClient(Func<ServerConnectionSettings> settings, AppearanceBlobCache cache, AppearanceTransferOptions? options = null)
         : this(settings, cache, options, CreateHandler(options ?? new AppearanceTransferOptions()))
@@ -421,13 +424,233 @@ public sealed class AppearanceTransferClient : IDisposable
         }, failure => failure).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Receives a bundle and holds its skeleton group (manifest format 2) for
+    /// as long as the caller needs it. Default off: with
+    /// <see cref="AppearanceReceiveOptions.Default"/> as <paramref name="receive"/> a format-2 manifest is
+    /// refused as <see cref="AppearanceTransferStatus.InvalidResponse"/>
+    /// before any blob is requested, as today.
+    /// <list type="number">
+    /// <item>The manifest is read and checked as for a download (exact canonical
+    /// bytes whose SHA-256 is <paramref name="bundleId"/>); the declared group
+    /// already passed the path rules there.</item>
+    /// <item>Before any blob request: a group with the bone deformer is refused
+    /// unless <see cref="AppearanceReceiveOptions.AllowDeformer"/>
+    /// (<see cref="AppearanceTransferStatus.SkeletonGroupNotAllowed"/>), and the
+    /// group's target race must equal <paramref name="puppetRaceCode"/>
+    /// (<see cref="AppearanceTransferStatus.SkeletonGroupRaceMismatch"/>).</item>
+    /// <item>Each blob, in manifest order: a group member is held through a
+    /// write-locked, re-hashed lease within its role's size limit (downloaded
+    /// first when missing, once); every other blob is verified in the cache as
+    /// for a download and released when this call returns.</item>
+    /// <item>The group is assembled from exactly the held bytes, against the
+    /// same race, all or nothing (<see cref="AppearanceTransferStatus.SkeletonGroupInvalid"/>).</item>
+    /// </list>
+    /// The receiver checks what the manifest declares (paths, bytes, race); it
+    /// cannot find a dependency the sender's capture left out. On any failure or
+    /// cancellation nothing stays held. A format-1 bundle gets no hold: it makes
+    /// exactly the requests <see cref="DownloadBundleAsync"/> makes. A returned
+    /// hold belongs to the caller and to this client: see <see cref="AppearanceBundleHold"/>.
+    /// </summary>
+    public async Task<AppearanceBundleHoldResult> HoldBundleAsync(
+        ContentHash bundleId, ushort? puppetRaceCode, AppearanceReceiveOptions receive, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(receive);
+        if (Prepare() is not { } target)
+            return new(new(AppearanceTransferStatus.Disabled));
+        var readOptions = receive.AllowSkeletonGroups ? AppearanceManifestReadOptions.AllowSkeletonGroups : AppearanceManifestReadOptions.FormatOneOnly;
+        var read = await ManifestAsync(target, bundleId, cancellationToken, readOptions).ConfigureAwait(false);
+        if (read.Manifest is not { } manifest)
+            return new(read.Result);
+        await Hook("hold:after-manifest").ConfigureAwait(false);
+        if (cancellationToken.IsCancellationRequested)
+            return new(new(AppearanceTransferStatus.Cancelled), Manifest: manifest);
+
+        // The cheap refusals: no blob is requested for a group this receiver will not use.
+        var group = manifest.SkeletonGroup;
+        var memberLimits = new Dictionary<ContentHash, long>();
+        if (group is not null)
+        {
+            if (!receive.AllowDeformer && group.Members.FirstOrDefault(member => member.Path.Role == SkeletonResourceRole.Deformer) is { } deformer)
+                return new(new(AppearanceTransferStatus.SkeletonGroupNotAllowed), Manifest: manifest, GamePath: deformer.Path.GamePath);
+            if (puppetRaceCode != group.RaceCode)
+                return new(new(AppearanceTransferStatus.SkeletonGroupRaceMismatch), Manifest: manifest);
+            // One hash serving two members is held once, within the larger role limit.
+            foreach (var member in group.Members)
+            {
+                memberLimits[member.Content.Hash] = Math.Max(
+                    memberLimits.GetValueOrDefault(member.Content.Hash), SkeletonResourceValidation.MaximumBytes(member.Path.Role));
+            }
+        }
+
+        var shortLeases = new List<AppearanceCacheLease>();
+        var held = new Dictionary<ContentHash, AppearanceCacheHeldLease>();
+        var keep = false;
+        try
+        {
+            foreach (var blob in manifest.Blobs)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    return new(new(AppearanceTransferStatus.Cancelled, Blob: blob.Hash), Manifest: manifest);
+                var result = memberLimits.TryGetValue(blob.Hash, out var limit)
+                    ? await HoldMemberAsync(target, bundleId, blob, limit, held, shortLeases, cancellationToken).ConfigureAwait(false)
+                    : await AcquireShortAsync(target, bundleId, blob, shortLeases, cancellationToken).ConfigureAwait(false);
+                if (!result.Succeeded)
+                    return new(result, Manifest: manifest);
+            }
+            if (group is null)
+                return new(AppearanceTransferResult.Success, Manifest: manifest);
+
+            await Hook("hold:before-assemble").ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested)
+                return new(new(AppearanceTransferStatus.Cancelled), Manifest: manifest);
+            // Exactly the bytes hashed through the held handles, against the same race.
+            var candidates = new List<SkeletonGroupCandidate>(group.Members.Count);
+            foreach (var member in group.Members)
+            {
+                if (held[member.Content.Hash].Bytes is not { } bytes)
+                {
+                    return new(new(AppearanceTransferStatus.SkeletonGroupInvalid), Manifest: manifest,
+                        Refusal: SkeletonGroupRefusal.Structure, GamePath: member.Path.GamePath, Problem: SkeletonStructureProblem.TooLarge);
+                }
+                candidates.Add(new SkeletonGroupCandidate(member.Path.GamePath, bytes));
+            }
+            var required = manifest.Files
+                .Where(file => SkeletonResourcePaths.TryClassify(file.GamePath, out _))
+                .Select(file => file.GamePath)
+                .ToArray();
+            var assembled = SkeletonResourceGroupAssembler.Assemble(group.RaceCode, required, candidates);
+            if (assembled.Group is not { } accepted)
+            {
+                return new(new(AppearanceTransferStatus.SkeletonGroupInvalid), Manifest: manifest,
+                    Refusal: assembled.Refusal, GamePath: assembled.GamePath, Problem: assembled.Problem);
+            }
+            // Defensive: the accepted members are exactly the declared ones.
+            if (!accepted.Members.Select(member => (member.Path.GamePath, member.Content))
+                    .SequenceEqual(group.Members.Select(member => (member.Path.GamePath, member.Content))))
+                return new(new(AppearanceTransferStatus.InvalidResponse), Manifest: manifest);
+
+            // The bytes are no longer needed; the handles keep the files unchanged.
+            foreach (var lease in held.Values)
+                lease.DropBytes();
+            var hold = new AppearanceBundleHold(this, bundleId, accepted, [.. held.Values]);
+            if (!Register(hold))
+            {
+                // This client was disposed meanwhile: nothing outlives it. (Disposed
+                // just after this, the client disposes the returned hold too.)
+                hold.Dispose();
+                return new(new(AppearanceTransferStatus.Cancelled), Manifest: manifest);
+            }
+            keep = true;
+            return new(AppearanceTransferResult.Success, hold, accepted, Manifest: manifest);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(new(AppearanceTransferStatus.Cancelled), Manifest: manifest);
+        }
+        finally
+        {
+            foreach (var lease in shortLeases)
+                lease.Dispose();
+            if (!keep)
+            {
+                foreach (var lease in held.Values)
+                    lease.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Test seam: holds this client made that are not yet disposed.</summary>
+    internal int LiveHoldCount
+    {
+        get
+        {
+            lock (holdGate)
+                return holds.Count;
+        }
+    }
+
+    /// <summary>Disposes every hold this client still has first, then the client.</summary>
     public void Dispose()
     {
+        AppearanceBundleHold[] live;
+        lock (holdGate)
+        {
+            disposed = true;
+            live = [.. holds];
+        }
+        foreach (var hold in live)
+            hold.Dispose();
         http.Dispose();
         encodeGate.Dispose();
     }
 
-    private async Task<AppearanceManifestRead> ManifestAsync(Target target, ContentHash bundleId, CancellationToken cancellationToken)
+    internal void Unregister(AppearanceBundleHold hold)
+    {
+        lock (holdGate)
+            holds.Remove(hold);
+    }
+
+    private bool Register(AppearanceBundleHold hold)
+    {
+        lock (holdGate)
+        {
+            if (disposed)
+                return false;
+            holds.Add(hold);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// A group member: held through a write-locked, re-hashed lease; when it is
+    /// not in the cache, downloaded once and then held. Still missing after that
+    /// is <see cref="AppearanceTransferStatus.CacheUnavailable"/>, without a retry.
+    /// </summary>
+    private async Task<AppearanceTransferResult> HoldMemberAsync(
+        Target target, ContentHash bundleId, AppearanceBlobRef blob, long maximumBytes,
+        Dictionary<ContentHash, AppearanceCacheHeldLease> held, List<AppearanceCacheLease> shortLeases, CancellationToken cancellationToken)
+    {
+        await Hook("hold:before-member").ConfigureAwait(false);
+        if (cancellationToken.IsCancellationRequested)
+            return new(AppearanceTransferStatus.Cancelled, Blob: blob.Hash);
+        var (state, lease) = await Cache.AcquireHeldAsync(blob, maximumBytes, cancellationToken).ConfigureAwait(false);
+        if (lease is null)
+        {
+            if (state == AppearanceCacheState.Unavailable)
+                return new(AppearanceTransferStatus.CacheUnavailable, Blob: blob.Hash);
+            var downloaded = await DownloadBlobAsync(target, bundleId, blob, shortLeases, cancellationToken).ConfigureAwait(false);
+            if (!downloaded.Succeeded)
+                return downloaded;
+            await Hook("hold:after-download").ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested)
+                return new(AppearanceTransferStatus.Cancelled, Blob: blob.Hash);
+            (_, lease) = await Cache.AcquireHeldAsync(blob, maximumBytes, cancellationToken).ConfigureAwait(false);
+            if (lease is null)
+                return new(AppearanceTransferStatus.CacheUnavailable, Blob: blob.Hash);
+        }
+        held.Add(blob.Hash, lease);
+        return AppearanceTransferResult.Success;
+    }
+
+    /// <summary>Any other blob: verified in the cache (downloaded when missing), exactly as a bundle download does.</summary>
+    private async Task<AppearanceTransferResult> AcquireShortAsync(
+        Target target, ContentHash bundleId, AppearanceBlobRef blob, List<AppearanceCacheLease> shortLeases, CancellationToken cancellationToken)
+    {
+        var (state, lease) = await Cache.AcquireAsync(blob, cancellationToken).ConfigureAwait(false);
+        if (lease is not null)
+        {
+            shortLeases.Add(lease);
+            return AppearanceTransferResult.Success;
+        }
+        if (state == AppearanceCacheState.Unavailable)
+            return new(AppearanceTransferStatus.CacheUnavailable, Blob: blob.Hash);
+        return await DownloadBlobAsync(target, bundleId, blob, shortLeases, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<AppearanceManifestRead> ManifestAsync(
+        Target target, ContentHash bundleId, CancellationToken cancellationToken,
+        AppearanceManifestReadOptions readOptions = AppearanceManifestReadOptions.FormatOneOnly)
     {
         if (!bundleId.IsValid)
             return new(new(AppearanceTransferStatus.InvalidResponse));
@@ -449,7 +672,7 @@ public sealed class AppearanceTransferClient : IDisposable
         // they must already be the canonical form (a semantically equal
         // reserialization would be another bundle and is refused).
         if (ContentHash.Of(bytes!) != bundleId ||
-            AppearanceBundleManifest.TryParse(bytes!, out _) is not { } manifest ||
+            AppearanceBundleManifest.TryParse(bytes!, readOptions, out _) is not { } manifest ||
             manifest.BundleId != bundleId || !manifest.CanonicalBytes.AsSpan().SequenceEqual(bytes!))
             return new(new(AppearanceTransferStatus.InvalidResponse));
         return new(AppearanceTransferResult.Success, manifest, bytes);

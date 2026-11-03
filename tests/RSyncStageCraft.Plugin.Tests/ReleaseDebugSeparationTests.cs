@@ -130,6 +130,19 @@ public sealed class ReleaseDebugSeparationTests
             Plugin.ReferenceCallers(target => target.Type == "RSyncStageCraft.Core.Appearance.GameAppearanceCaptureReader" && target.Name == ".ctor"));
     }
 
+    [Fact]
+    public void NothingInThePluginReceivesASkeletonGroup()
+    {
+        // Receiving a skeleton group is not wired: no plugin method constructs,
+        // copies, reads or sets the receive options, calls HoldBundleAsync or
+        // touches a bundle hold.
+        const string options = "RSyncStageCraft.Core.Appearance.AppearanceReceiveOptions";
+        const string hold = "RSyncStageCraft.Core.Appearance.AppearanceBundleHold";
+        const string client = "RSyncStageCraft.Core.Appearance.AppearanceTransferClient";
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Type is options or hold ||
+            (target.Type == client && target.Name == "HoldBundleAsync")));
+    }
+
     [Theory]
     [InlineData("Debug tools")]
     [InlineData("self-test")]
