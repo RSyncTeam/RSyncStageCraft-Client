@@ -291,6 +291,10 @@ public sealed class AppearanceTransferClient : IDisposable
             if (leases.FirstOrDefault(held => held.Blob.Hash == blob.Hash) is not { } entry)
                 return new(new(AppearanceTransferStatus.CacheUnavailable, Blob: blob.Hash), blob.Hash);
             var bytes = await ReadVerifiedAsync(entry.Path, blob, cancellationToken).ConfigureAwait(false);
+            // A read that does not match withdraws the session's trust in the
+            // entry, so its next use re-hashes it (and replaces it if corrupt).
+            if (bytes is null)
+                Cache.Distrust(blob.Hash);
             return bytes is null
                 ? new(new(AppearanceTransferStatus.CacheUnavailable, Blob: blob.Hash), blob.Hash)
                 : new(AppearanceTransferResult.Success, blob.Hash, bytes);

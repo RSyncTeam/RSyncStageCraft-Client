@@ -98,6 +98,67 @@ public sealed class AppearanceCacheLease : IDisposable
 }
 
 /// <summary>
+/// A verified cache entry held for as long as it is needed (a lifetime
+/// lease). Like <see cref="AppearanceCacheLease"/> it is never evicted or
+/// cleared while held; in addition the file stays open for reading with no
+/// write or delete sharing, so on Windows no other program can change,
+/// replace or delete it while it is held. (Elsewhere the sharing mode is only
+/// advisory and does not stop other programs.) Its content was hashed through
+/// this same handle when it was acquired, whatever the cache trusted before.
+/// Dispose it when the file is no longer needed: the handle is closed first,
+/// then the entry is released.
+/// </summary>
+public sealed class AppearanceCacheHeldLease : IDisposable
+{
+    private readonly AppearanceBlobCache cache;
+    private FileStream? file;
+    private byte[]? bytes;
+    private int released;
+
+    internal AppearanceCacheHeldLease(AppearanceBlobCache cache, AppearanceBlobRef blob, string path, FileStream file, byte[]? bytes)
+    {
+        this.cache = cache;
+        this.file = file;
+        this.bytes = bytes;
+        Blob = blob;
+        Path = path;
+    }
+
+    public AppearanceBlobRef Blob { get; }
+
+    /// <summary>The held raw file (local only; never logged or sent).</summary>
+    public string Path { get; }
+
+    /// <summary>True until the lease is disposed.</summary>
+    public bool IsHeld => Volatile.Read(ref released) == 0;
+
+    /// <summary>
+    /// The verified bytes, exactly those hashed through the held handle, when
+    /// they were requested within the acquisition's bound; otherwise (and
+    /// after disposal) null.
+    /// </summary>
+    public ReadOnlyMemory<byte>? Bytes
+    {
+        get
+        {
+            if (!IsHeld || Volatile.Read(ref bytes) is not { } content)
+                return null;
+            return content;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref released, 1) != 0)
+            return;
+        Volatile.Write(ref bytes, null);
+        cache.ReleaseHeld(Blob.Hash, Interlocked.Exchange(ref file, null));
+    }
+
+    public override string ToString() => $"Held cache lease {Blob.Hash.Value}";
+}
+
+/// <summary>
 /// Space reserved within the cache limit for temporary files. Released
 /// on dispose, or taken over by the entry it becomes when published.
 /// </summary>
@@ -179,6 +240,7 @@ public sealed class AppearanceBlobCache
     private readonly Dictionary<string, Entry> entries = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly Dictionary<string, int> pins = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim evictionGate = new(1, 1);
+    private int heldHandles;
     private long storedBytes;
     private long reservedBytes;
     private long limitBytes;
@@ -331,6 +393,43 @@ public sealed class AppearanceBlobCache
             return (state, null);
         return (state, Acquired(blob));
     }
+
+    /// <summary>
+    /// A held, write-locked lease of a verified copy of <paramref name="blob"/>
+    /// (a lifetime lease). Under the blob's lock the entry is opened for
+    /// reading with no write or delete sharing, then read and hashed in full
+    /// through that same handle: what this session trusted before is never
+    /// relied on. A match is pinned, recorded as used and returned with the
+    /// handle still open, and with the verified bytes when
+    /// <paramref name="maximumBytes"/> admits them (0 keeps none). A mismatch
+    /// is proven corrupt: the session's trust in the hash is withdrawn, the
+    /// entry is removed and the result is <see cref="AppearanceCacheState.Missing"/>.
+    /// A file that cannot be opened this way (another program has it open for
+    /// writing) or read is <see cref="AppearanceCacheState.Unavailable"/>.
+    /// On every failure or cancellation the handle is closed and nothing
+    /// stays pinned.
+    /// </summary>
+    public async Task<(AppearanceCacheState State, AppearanceCacheHeldLease? Lease)> AcquireHeldAsync(
+        AppearanceBlobRef blob, long maximumBytes, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumBytes);
+        if (blob is not { IsValid: true })
+            return (AppearanceCacheState.Missing, null);
+        await Hook("held:before-lock", blob.Hash).ConfigureAwait(false);
+        using var held = await LockAsync(blob.Hash, cancellationToken).ConfigureAwait(false);
+        await Hook("held:in-lock", blob.Hash).ConfigureAwait(false);
+        return await HoldLockedAsync(blob, maximumBytes, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Withdraws this session's trust in <paramref name="hash"/>: its next use
+    /// re-hashes the entry in full. Called when a read of a leased entry did
+    /// not match. It only ever causes a re-hash, so it needs no lock.
+    /// </summary>
+    internal void Distrust(ContentHash hash) => verified.TryRemove(hash.Value, out _);
+
+    /// <summary>Test seam: handles currently open for held leases (and for acquisitions in progress).</summary>
+    internal int HeldHandleCount => Volatile.Read(ref heldHandles);
 
     /// <summary>
     /// Reserves <paramref name="bytes"/> within the limit for temporary files,
@@ -617,6 +716,152 @@ public sealed class AppearanceBlobCache
         {
             return AppearanceCacheState.Unavailable;
         }
+    }
+
+    /// <summary>Under the blob's lock: see <see cref="AcquireHeldAsync"/>.</summary>
+    private async Task<(AppearanceCacheState State, AppearanceCacheHeldLease? Lease)> HoldLockedAsync(
+        AppearanceBlobRef blob, long maximumBytes, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = PathOf(blob.Hash);
+        FileStream? file = null;
+        try
+        {
+            // Never read through a folder link (its folder, blobs/ or the root).
+            if (!IsInsideWithoutLinks(Path.GetDirectoryName(path)!))
+                return (AppearanceCacheState.Unavailable, null);
+            if (Directory.Exists(path))
+                return (AppearanceCacheState.Unavailable, null);
+            var info = new FileInfo(path);
+            if (info.LinkTarget is not null || (info.Exists && (info.Attributes & FileAttributes.ReparsePoint) != 0))
+            {
+                // A link or reparse point is never followed or trusted: the link
+                // itself (never its target) is removed like a corrupt entry.
+                File.Delete(path);
+                Distrust(blob.Hash);
+                Unindex(path);
+                return (AppearanceCacheState.Missing, null);
+            }
+            if (!info.Exists)
+            {
+                Distrust(blob.Hash);
+                Unindex(path);
+                return (AppearanceCacheState.Missing, null);
+            }
+            try
+            {
+                // Read access, read sharing only: while open, no other handle can
+                // write or delete it, and it cannot be opened at all while another
+                // handle already has it open for writing.
+                file = new FileStream(path, new FileStreamOptions
+                {
+                    Mode = FileMode.Open,
+                    Access = FileAccess.Read,
+                    Share = FileShare.Read,
+                    Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+                });
+            }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                Distrust(blob.Hash);
+                Unindex(path);
+                return (AppearanceCacheState.Missing, null);
+            }
+            Interlocked.Increment(ref heldHandles);
+            await Hook("held:opened", blob.Hash).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            // Until this re-hash completes nothing is trusted: a failed or
+            // cancelled read leaves the next use to re-hash in full.
+            Distrust(blob.Hash);
+            var keep = blob.Size <= maximumBytes && blob.Size <= Array.MaxLength;
+            var (matches, content) = await ReadHeldAsync(file, blob, keep, cancellationToken).ConfigureAwait(false);
+            if (!matches)
+            {
+                // Proven corrupt through the held handle: the trust is withdrawn
+                // and this exact entry is removed so a verified copy can replace it.
+                CloseHeld(file);
+                file = null;
+                Distrust(blob.Hash);
+                File.Delete(path);
+                Unindex(path);
+                return (AppearanceCacheState.Missing, null);
+            }
+            verified[blob.Hash.Value] = blob.Size;
+            Indexed(path, blob.Hash, new FileInfo(path));
+            lock (sync)
+                pins[blob.Hash.Value] = pins.GetValueOrDefault(blob.Hash.Value) + 1;
+            Touch(blob.Hash);
+            var lease = new AppearanceCacheHeldLease(this, blob, path, file, content);
+            file = null;
+            return (AppearanceCacheState.Present, lease);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return (AppearanceCacheState.Unavailable, null);
+        }
+        finally
+        {
+            if (file is not null)
+                CloseHeld(file);
+        }
+    }
+
+    /// <summary>
+    /// Reads the whole held file through its own handle, hashing as it goes;
+    /// keeps the bytes when asked. Content longer than the expected size is
+    /// refused as soon as a read passes it, so at most one read buffer
+    /// (BufferBytes, 81,920 bytes) beyond that size is consumed, never the
+    /// rest of the file.
+    /// </summary>
+    private static async Task<(bool Matches, byte[]? Bytes)> ReadHeldAsync(
+        FileStream file, AppearanceBlobRef blob, bool keep, CancellationToken cancellationToken)
+    {
+        var content = keep ? new byte[blob.Size] : null;
+        var buffer = ArrayPool<byte>.Shared.Rent(BufferBytes);
+        try
+        {
+            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long total = 0;
+            int read;
+            while ((read = await file.ReadAsync(buffer.AsMemory(0, BufferBytes), cancellationToken).ConfigureAwait(false)) > 0)
+            {
+                if (total + read > blob.Size)
+                    return (false, null);
+                sha.AppendData(buffer, 0, read);
+                if (content is not null)
+                    buffer.AsSpan(0, read).CopyTo(content.AsSpan((int)total));
+                total += read;
+            }
+            var matches = total == blob.Size &&
+                string.Equals(Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant(), blob.Hash.Value, StringComparison.Ordinal);
+            return matches ? (true, content) : (false, null);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>Closes a held handle and counts it closed.</summary>
+    private void CloseHeld(FileStream file)
+    {
+        try
+        {
+            file.Dispose();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // A read-only handle has nothing to flush; closing it cannot lose data.
+        }
+        Interlocked.Decrement(ref heldHandles);
+    }
+
+    /// <summary>A held lease was disposed: its handle is closed first, then the entry is released.</summary>
+    internal void ReleaseHeld(ContentHash hash, FileStream? file)
+    {
+        if (file is not null)
+            CloseHeld(file);
+        Unpin(hash);
     }
 
     private static async Task<bool> HashesToAsync(string path, AppearanceBlobRef blob, CancellationToken cancellationToken)
