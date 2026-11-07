@@ -134,14 +134,29 @@ public sealed class ReleaseDebugSeparationTests
     public void NothingInThePluginReceivesASkeletonGroup()
     {
         // Receiving a skeleton group is not wired: no plugin method constructs,
-        // copies, reads or sets the receive options, calls HoldBundleAsync or
-        // touches a bundle hold.
+        // copies, reads or sets the receive options, calls HoldBundleAsync,
+        // touches a bundle hold or uses the Debug skeleton-group receiver.
         const string options = "RSyncStageCraft.Core.Appearance.AppearanceReceiveOptions";
         const string hold = "RSyncStageCraft.Core.Appearance.AppearanceBundleHold";
         const string client = "RSyncStageCraft.Core.Appearance.AppearanceTransferClient";
         Assert.Empty(Plugin.ReferenceCallers(target => target.Type is options or hold ||
-            (target.Type == client && target.Name == "HoldBundleAsync")));
+            (target.Type == client && target.Name == "HoldBundleAsync") ||
+            SkeletonGroupReceiverTypes.Contains(target.Type)));
+        // Nor does the plugin name the receiver's types at all: no field,
+        // parameter, local, call or implementation of the host port.
+        Assert.Empty(Plugin.ReferencedTypeNames.Intersect(SkeletonGroupReceiverTypes, StringComparer.Ordinal));
     }
+
+    /// <summary>The Debug skeleton-group receiver (W1) and everything only it uses; not wired to any plugin code.</summary>
+    private static readonly string[] SkeletonGroupReceiverTypes =
+    [
+        "RSyncStageCraft.Core.Appearance.SkeletonGroupReceiver",
+        "RSyncStageCraft.Core.Appearance.ISkeletonGroupAssignmentPort",
+        "RSyncStageCraft.Core.Appearance.ActorSlotKey",
+        "RSyncStageCraft.Core.Appearance.SkeletonGroupReceiveResult",
+        "RSyncStageCraft.Core.Appearance.SkeletonGroupReceiveStatus",
+        "RSyncStageCraft.Core.Appearance.SkeletonGroupReceiveStep",
+    ];
 
     [Theory]
     [InlineData("Debug tools")]
@@ -181,6 +196,10 @@ public sealed class ReleaseDebugSeparationTests
                 handle = reader.GetNextHandle(handle);
             }
             UserStrings = strings;
+            ReferencedTypeNames = reader.TypeReferences
+                .Select(reference => reader.GetTypeReference(reference))
+                .Select(reference => reader.GetString(reference.Namespace) + "." + reader.GetString(reference.Name))
+                .ToHashSet(StringComparer.Ordinal);
             var provider = new TypeNameProvider();
             foreach (var typeHandle in reader.TypeDefinitions)
             {
@@ -208,6 +227,9 @@ public sealed class ReleaseDebugSeparationTests
         }
 
         public IReadOnlyList<string> UserStrings { get; }
+
+        /// <summary>Every type another assembly defines that the plugin names, as namespace and name.</summary>
+        public IReadOnlyCollection<string> ReferencedTypeNames { get; }
         public IReadOnlyCollection<string> TypeNames => types;
 
         public bool HasType(string name) => types.Contains(name);
