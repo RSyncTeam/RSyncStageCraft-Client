@@ -158,6 +158,51 @@ public sealed class ReleaseDebugSeparationTests
         "RSyncStageCraft.Core.Appearance.SkeletonGroupReceiveStep",
     ];
 
+    /// <summary>The stage-3 Debug human puppet host (H-0): Client code under RSC_DEVELOPMENT only.</summary>
+    private const string HumanPuppetNamespace = "RSyncStageCraft.Core.Actors.Humans.";
+
+    [Fact]
+    public void TheHumanPuppetHostIsCompiledOutOfRelease()
+    {
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        Assert.Equal(Debug, client.GetType(HumanPuppetNamespace + "HumanPuppetHost") is not null);
+        Assert.Equal(Debug, client.GetTypes().Any(type => type.FullName!.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void NothingInThePluginComposesTheHumanPuppetHost()
+    {
+        // Composition is not part of this candidate: no plugin method names,
+        // constructs, calls or implements any human puppet type, in either
+        // build, so no build can reach it.
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Type.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal)));
+        Assert.DoesNotContain(Plugin.ReferencedTypeNames, name => name.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("ApplyState")]
+    [InlineData("ApplyStateName")]
+    [InlineData("UnlockState")]
+    [InlineData("UnlockStateName")]
+    [InlineData("UnlockAll")]
+    [InlineData("RevertState")]
+    [InlineData("RevertStateName")]
+    [InlineData("RevertToAutomation")]
+    [InlineData("RevertToAutomationName")]
+    [InlineData("SetItem")]
+    [InlineData("SetItemName")]
+    [InlineData("DeletePlayerState")]
+    public void NoBuildReferencesAGlamourerStateWrite(string subscriber)
+    {
+        // H-12: no state-writing Glamourer path, and no DeletePlayerState (P14),
+        // until a later candidate: the plugin names no such Glamourer.Api
+        // subscriber, calls no member of one, and holds no such IPC label.
+        Assert.DoesNotContain(Plugin.ReferencedTypeNames, name => name.EndsWith("." + subscriber, StringComparison.Ordinal));
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Type.StartsWith("Glamourer.", StringComparison.Ordinal) &&
+            (target.Type.EndsWith("." + subscriber, StringComparison.Ordinal) || target.Name == subscriber)));
+        Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith("Glamourer." + subscriber, StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("Debug tools")]
     [InlineData("self-test")]

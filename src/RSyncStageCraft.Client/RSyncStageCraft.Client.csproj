@@ -9,6 +9,11 @@
     <Copyright>Copyright (C) 2026 RSyncTeam</Copyright>
     <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
   </PropertyGroup>
+  <!-- Debug only: the stage-3 human puppet host (Actors/Humans) is compiled
+       under RSC_DEVELOPMENT and is absent from a Release build. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);RSC_DEVELOPMENT</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="RSyncStageCraft" />
     <InternalsVisibleTo Include="RSyncStageCraft.Client.Tests" />

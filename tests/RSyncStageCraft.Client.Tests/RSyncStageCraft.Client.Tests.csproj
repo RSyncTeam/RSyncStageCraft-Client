@@ -7,6 +7,10 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+  <!-- Debug only, as in the client: the human puppet host's tests. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);RSC_DEVELOPMENT</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <Using Include="Xunit" />
     <!-- Shared fixtures (the authentication fixture and actor host fakes) for the plugin tests. -->
