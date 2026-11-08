@@ -38,6 +38,14 @@ public sealed class HumanPuppetT3Tests
         return (host, result.Handle!.Value);
     }
 
+    // As live, the human model is read only once a draw object exists.
+    private (HumanPuppetHost Host, HumanPuppetHandle Handle) Drawn()
+    {
+        var (host, handle) = Spawned();
+        Assert.True(host.RequestDraw(handle).Done);
+        return (host, handle);
+    }
+
     private static int IndexOfCall(List<string> calls, string call)
     {
         var index = calls.IndexOf(call);
@@ -133,22 +141,6 @@ public sealed class HumanPuppetT3Tests
         // The player is only read: it is neither hidden nor made untargetable.
         Assert.True(scene.Player.Targetable);
         Assert.False(scene.Player.NameplateHidden);
-    }
-
-    [Fact]
-    public void AWrongKindAfterTheCopiesStopsWithNoKindWrite()
-    {
-        // R-8 is not approved: the copies leaving the player kind is a stop.
-        scene.CopyCopiesKind = true;
-        var host = Ready();
-        var result = host.Spawn();
-        Assert.Equal(HumanPuppetStopRule.S5Identity, result.Stop!.Rule);
-        Assert.Equal("copy", result.Stop.Step);
-        // Stopped straight after the copies: no kind, hiding, map or identity write.
-        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("write identity", StringComparison.Ordinal) ||
-            call.StartsWith("hide prepare", StringComparison.Ordinal) || call.StartsWith("penumbra set", StringComparison.Ordinal) ||
-            call.StartsWith("customize set", StringComparison.Ordinal));
-        Assert.False(scene.Exists(200));
     }
 
     // ---- Hiding (H1-a, H1-e) ----
@@ -289,7 +281,7 @@ public sealed class HumanPuppetT3Tests
     [Fact]
     public void AnUnreadableCollectionTypeIsAProviderStopNeverNotSet()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         scene.UnreadableRoles.Add(HumanCollectionRoleKind.Gender);
         var outcome = host.VerifyIsolation(handle);
         Assert.Equal(HumanPuppetStopRule.Provider, outcome.Stop!.Rule);
@@ -385,7 +377,7 @@ public sealed class HumanPuppetT3Tests
     [Fact]
     public void ACollectionReadThatThrowsIsAProviderStop()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         scene.ThrowWhen = call => call == "collection";
         Assert.Equal(HumanPuppetStopRule.Provider, host.VerifyIsolation(handle).Stop!.Rule);
         Assert.False(scene.Exists(200));
@@ -420,7 +412,14 @@ public sealed class HumanPuppetT3Tests
 
         public bool HomeWorldThrows { get; set; }
 
-        public ushort? PlayerHomeWorld() => HomeWorldThrows ? throw new InvalidOperationException("synthetic probe fault") : scene.Player.World;
+        /// <summary>Runs at the step's own H-3 read: after the host's update and before the step itself.</summary>
+        public Action? BeforeStep { get; set; }
+
+        public ushort? PlayerHomeWorld()
+        {
+            BeforeStep?.Invoke();
+            return HomeWorldThrows ? throw new InvalidOperationException("synthetic probe fault") : scene.Player.World;
+        }
 
         public List<KeyValuePair<string, string>> Observations { get; } = [];
 
@@ -710,16 +709,61 @@ public sealed class HumanPuppetT3Tests
         Assert.Equal(7, sequence.NextStep);
     }
 
+    // R-8a case 7: with the fake as live (the copies leave the player's kind,
+    // and no human model before a draw object), the restored spawn runs to the report.
+    [Fact]
+    public void TheRestoredSpawnRunsEveryStepWithTheLiveCopyReadings()
+    {
+        var (sequence, log, _) = Sequence();
+        foreach (var step in HumanPuppetT3Sequence.Steps)
+            Run(sequence, step);
+        Assert.Equal(HumanPuppetT3Sequence.Steps.Count, sequence.NextStep);
+        Assert.Null(sequence.Host.Stop);
+        foreach (var copy in new[] { "from the player", "self-copy" })
+            Assert.Contains(log, line => line.Contains($"copy {copy}: kind 1,", StringComparison.Ordinal) &&
+                line.Contains("human model False, customize filled True", StringComparison.Ordinal));
+        Assert.Single(log, line => line.Contains(
+            $"kind restored after the copies: created 2/{FakeHumanScene.CreatedSubKind}, after the copies 1/{FakeHumanScene.PlayerSubKind}, " +
+            $"read back 2/{FakeHumanScene.CreatedSubKind}, restored True.", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("isolation held (P6(a), P16).", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("report complete.", StringComparison.Ordinal));
+        Assert.Single(scene.Calls, call => call.StartsWith("restore kind", StringComparison.Ordinal));
+        Assert.Equal(HumanPuppetPhase.Deleted, Assert.Single(sequence.Host.Snapshot()).Phase);
+    }
+
     [Fact]
     public void ThePuppetIsNotObservedWhenItsDrawWasNotObserved()
     {
+        // Delayed observation: the draw object appears only after the host's
+        // last update, just before the isolation step reads it. Isolation can
+        // hold, but the draw was never observed, so the observations are not read.
+        scene.DrawAppears = false;
+        var (sequence, log, probe) = Sequence();
+        foreach (var step in new[] { "cp3", "baseline", "spawn", "draw" })
+            Run(sequence, step);
+        probe.BeforeStep = () => scene.DrawAppears = true;
+        Run(sequence, "isolation");
+        Assert.Null(Assert.Single(sequence.Host.Snapshot()).DrawObservedUpdate);
+        Assert.Contains(log, line => line.Contains("isolation held", StringComparison.Ordinal));
+        Assert.Empty(probe.ObservationReads);
+        Assert.Contains(log, line => line.Contains("puppet observations not read: the draw was not observed.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnAbsentDrawObjectMeansNoHumanModelSoIsolationDoesNotHoldAndNothingIsObserved()
+    {
+        // The draw object never appears: as live, the human model reads False,
+        // so isolation is refused (no stop) and the observations are not read.
         scene.DrawAppears = false;
         var (sequence, log, probe) = Sequence();
         foreach (var step in new[] { "cp3", "baseline", "spawn", "draw", "isolation" })
             Run(sequence, step);
-        Assert.Contains(log, line => line.Contains("isolation held", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("isolation did not hold: CustomizeNotFilled", StringComparison.Ordinal));
+        Assert.DoesNotContain(log, line => line.Contains("isolation held", StringComparison.Ordinal));
         Assert.Empty(probe.ObservationReads);
-        Assert.Contains(log, line => line.Contains("puppet observations not read: the draw was not observed.", StringComparison.Ordinal));
+        Assert.Equal(4, sequence.NextStep);
+        Assert.Null(sequence.Host.Stop);
+        Assert.Null(Assert.Single(sequence.Host.Snapshot()).DrawObservedUpdate);
     }
 
     [Fact]

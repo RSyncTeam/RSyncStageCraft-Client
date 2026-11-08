@@ -14,6 +14,9 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
 {
     public const ushort PlayerWorld = 7001;
     public const string PlayerName = "Test Player";
+    // Synthetic sub-kinds: one the allocator gives a new BattleNpc, one the player has.
+    public const byte CreatedSubKind = 5;
+    public const byte PlayerSubKind = 4;
     public static readonly Guid DefaultCollection = new("00000000-0000-0000-0000-00000000d0f1");
 
     private readonly nint[] com = new nint[ActorSlotRange.ComSlotCount];
@@ -29,6 +32,9 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
         Player.Name = PlayerName;
         Player.World = PlayerWorld;
         Player.HasHumanModel = true;
+        Player.SubKind = PlayerSubKind;
+        // The player is drawn, so its human model is readable.
+        Player.DrawEnabled = true;
         // Race 1, gender 0, body type 1 (adult), clan 1.
         Player.Customize = [1, 0, 1, 0, 1, .. new byte[21]];
     }
@@ -44,7 +50,18 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
     public bool Available { get; set; } = true;
     public int NextGlobalIndex { get; set; } = -1;
     public bool CreateReturnsNothingButAllocates { get; set; }
-    public bool CopyCopiesKind { get; set; }
+    // Live T3-1M: the copy from the player leaves the player's kind and sub-kind.
+    public bool CopyCopiesKind { get; set; } = true;
+    public int CreatedKind { get; set; } = 2;
+    /// <summary>R-8a: the restore writes nothing, so its read-back differs.</summary>
+    public bool RestoreKindFails { get; set; }
+    /// <summary>Called after each kind read with its 1-based count (2 = the read after the copies).</summary>
+    public Action<int>? OnReadKind { get; set; }
+    public int KindReads { get; private set; }
+    /// <summary>The 1-based kind read that reports the pair unreadable, or null for none.</summary>
+    public int? UnreadableKindRead { get; set; }
+    /// <summary>With the kind not copied: the sub-kind the copy from the player leaves, or null to leave it.</summary>
+    public byte? CopySetsSubKind { get; set; }
     public bool CopyChangesEntityId { get; set; }
     public uint CopiedNameId { get; set; }
     public ulong CopiedOwner { get; set; } = HumanPuppetFacts.NoOwner;
@@ -91,6 +108,7 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
         public ulong GameObjectId;
         public uint EntityId;
         public int Kind;
+        public byte SubKind;
         public string? Name;
         public bool Terminated = true;
         public ushort World;
@@ -159,7 +177,8 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
         Calls.Add("create");
         var slot = Array.IndexOf(com, (nint)0);
         var global = NextGlobalIndex >= 0 ? NextGlobalIndex : ActorSlotRange.MinimumGlobalIndex + slot;
-        var obj = Add(global, slot, kind: 2);
+        var obj = Add(global, slot, kind: CreatedKind);
+        obj.SubKind = CreatedSubKind;
         obj.Alpha = 1f;
         return CreateReturnsNothingButAllocates ? -1 : slot;
     }
@@ -180,8 +199,30 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
     {
         Throw("read");
         var obj = byAddress[address];
+        // As live, where ReadFacts and HasHumanDrawObject both read the same
+        // human draw object: there is a human model only while that draw object exists.
         return new(obj.GlobalIndex, obj.GameObjectId, obj.EntityId, obj.Kind, obj.Name, obj.Terminated, obj.World, obj.NameId,
-            obj.Owner, obj.HasHumanModel, obj.Customize?.ToArray(), obj.Targetable);
+            obj.Owner, obj.HasHumanModel && HumanDrawObject(obj), obj.Customize?.ToArray(), obj.Targetable);
+    }
+
+    public HumanPuppetKindPair? ReadKind(nint address)
+    {
+        Throw("kind read");
+        var obj = byAddress[address];
+        var pair = new HumanPuppetKindPair((byte)obj.Kind, obj.SubKind);
+        var count = ++KindReads;
+        OnReadKind?.Invoke(count);
+        return count == UnreadableKindRead ? null : pair;
+    }
+
+    public void RestoreKind(nint puppet, HumanPuppetKindPair kind)
+    {
+        var obj = byAddress[puppet];
+        Calls.Add($"restore kind {obj.GlobalIndex} {kind.Kind}/{kind.SubKind}");
+        if (RestoreKindFails)
+            return;
+        obj.Kind = kind.Kind;
+        obj.SubKind = kind.SubKind;
     }
 
     private void Throw(string call)
@@ -213,7 +254,12 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
         target.NameId = puppet == source ? target.NameId : CopiedNameId;
         target.Owner = puppet == source ? target.Owner : CopiedOwner;
         if (CopyCopiesKind)
+        {
             target.Kind = from.Kind;
+            target.SubKind = from.SubKind;
+        }
+        else if (CopySetsSubKind is { } subKind && puppet != source)
+            target.SubKind = subKind;
         if (CopyChangesEntityId)
             target.EntityId++;
         // Both copy hooks: the child's parent is the source's index.
@@ -255,7 +301,15 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
         byAddress[address].DrawEnabled = false;
     }
 
-    public bool HasHumanDrawObject(nint address) => DrawAppears && byAddress[address].DrawEnabled;
+    public bool HasHumanDrawObject(nint address) => HumanDrawObject(byAddress[address]);
+
+    /// <summary>
+    /// A draw object exists once drawing is enabled. <see cref="DrawAppears"/>
+    /// false means a puppet's draw object never appears (the player, already
+    /// drawn, keeps its own); setting it true later models a draw object that
+    /// appears after the host's last observation.
+    /// </summary>
+    private bool HumanDrawObject(Obj obj) => obj.DrawEnabled && (DrawAppears || obj == Player);
 
     public HumanPuppetScanEntry? ScanEntry(int globalIndex)
     {

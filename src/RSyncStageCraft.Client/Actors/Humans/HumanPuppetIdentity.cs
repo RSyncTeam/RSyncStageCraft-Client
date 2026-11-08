@@ -149,7 +149,7 @@ public static class HumanPuppetW2
 /// <summary>The object kind a spawn records at setup (P5-6): F1 decides whether the player kind is needed.</summary>
 public enum HumanPuppetKind
 {
-    /// <summary>Kind 2, left as the copies leave it; no kind write.</summary>
+    /// <summary>Kind 2. R-8a: if the copies change it, the kind and sub-kind recorded at creation are written back once.</summary>
     BattleNpc = 2,
 
     /// <summary>Kind 1, written by SI-1's kind field (F1 only).</summary>

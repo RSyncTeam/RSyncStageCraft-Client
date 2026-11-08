@@ -148,6 +148,19 @@ public sealed record HumanPuppetSpawnResult(
     IReadOnlyList<HumanPuppetCopyRecord> Copies)
 {
     public bool Spawned => Handle is not null;
+
+    /// <summary>
+    /// R-8a: the kind and sub-kind as created, as the copies left them, and
+    /// as read back after the one restore; null when no restore was written.
+    /// </summary>
+    public HumanPuppetKindRestore? KindRestore { get; init; }
+}
+
+/// <summary>R-8a's one restore: the pair as created, after the copies, and as read back after the write (null if unreadable).</summary>
+public sealed record HumanPuppetKindRestore(HumanPuppetKindPair Created, HumanPuppetKindPair AfterCopies, HumanPuppetKindPair? ReadBack)
+{
+    /// <summary>Both bytes read back equal to the created pair.</summary>
+    public bool Restored => ReadBack == Created;
 }
 
 /// <summary>An operation's outcome: done, refused before any side effect, or stopped.</summary>

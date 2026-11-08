@@ -262,6 +262,10 @@ public sealed class HumanPuppetT3Sequence
             log(Prefix + $"copy {copy.Copy}: kind {copy.RawKind}, world is W-2 {copy.HomeWorld == HumanPuppetW2.WorldId}, " +
                 $"name id set {copy.NameId != 0}, owner set {copy.OwnerId != HumanPuppetFacts.NoOwner}, human model {copy.HasHumanModel}, " +
                 $"customize filled {copy.CustomizeFilled}, targetable {copy.Targetable}.");
+        if (result.KindRestore is { } restore)
+            log(Prefix + $"kind restored after the copies: created {restore.Created.Kind}/{restore.Created.SubKind}, " +
+                $"after the copies {restore.AfterCopies.Kind}/{restore.AfterCopies.SubKind}, read back " +
+                (restore.ReadBack is { } back ? $"{back.Kind}/{back.SubKind}" : "unreadable") + $", restored {restore.Restored}.");
         if (!result.Spawned)
         {
             log(Prefix + "spawn did not complete: " + (result.Stop is { } stop ? DescribeStop(stop) : result.Refusal.ToString()) + ".");

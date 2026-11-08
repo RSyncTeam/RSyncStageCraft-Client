@@ -208,6 +208,7 @@ public sealed class HumanPuppetHost
 
         var callReadings = new List<HumanParentMapReading>();
         var copies = new List<HumanPuppetCopyRecord>();
+        HumanPuppetKindRestore? kindRestore = null;
         var name = FreshName();
         usedNames.Add(name);
         // H1-b: the generation this puppet lives under; any change while it is live stops.
@@ -218,7 +219,7 @@ public sealed class HumanPuppetHost
             var stop = Latch(rule, step, detail);
             CleanLive("stop");
             readings.AddRange(callReadings);
-            return new(null, HumanPuppetRefusal.None, stop, callReadings, copies);
+            return new(null, HumanPuppetRefusal.None, stop, callReadings, copies) { KindRestore = kindRestore };
         }
 
         // 1. Create, and prove the exact new object is RSC's (checks 1–5).
@@ -267,6 +268,8 @@ public sealed class HumanPuppetHost
             return Failed(HumanPuppetStopRule.Ownership, "create", "the new object is outside 200–439");
         }
         puppet.BindFacts(created);
+        // R-8a: the kind and sub-kind as created, before any write.
+        puppet.CreatedKind = backend.ReadKind(address);
         backend.SetAlpha(address, 0f);
 
         // 2–3. B-2: copy from the player, then the self-copy; re-prove after each.
@@ -289,8 +292,34 @@ public sealed class HumanPuppetHost
             backend.SetAlpha(address, 0f);
         }
 
-        // R-8 is not approved: a kind other than BattleNpc after the copies
-        // stops here, before any hiding, map or identity write, and is never corrected.
+        // R-8a (D4 as amended): the copy from the player can leave the
+        // player's kind and sub-kind. Only on a BattleNpc request whose
+        // creation produced BattleNpc, and only when the copies changed the
+        // pair, the pair recorded at creation is written back once, on the
+        // proved object, and both bytes are read back before any hiding, map
+        // or identity write. No other kind is ever written, and no other
+        // object is written. An unreadable pair gets no write.
+        if (kind == HumanPuppetKind.BattleNpc &&
+            puppet.CreatedKind is { Kind: (byte)HumanPuppetKind.BattleNpc } createdKind &&
+            backend.ReadKind(address) is { } afterCopies && afterCopies != createdKind)
+        {
+            // Checks 1–5 immediately before the write.
+            if (OwnershipMismatch(puppet) is { } beforeRestore)
+            {
+                Forget(puppet, $"before the kind restore: {beforeRestore}");
+                return Failed(HumanPuppetStopRule.Ownership, "copy", beforeRestore);
+            }
+            backend.RestoreKind(address, createdKind);
+            kindRestore = new(createdKind, afterCopies, backend.ReadKind(address));
+            if (!kindRestore.Restored)
+            {
+                AbortInCall(puppet, "the restored kind did not read back");
+                return Failed(HumanPuppetStopRule.S5Identity, "copy", "the kind and sub-kind did not read back as created after the restore");
+            }
+        }
+
+        // D4: a kind other than BattleNpc after the copies (and any restore)
+        // stops here, before any hiding, map or identity write.
         if (kind == HumanPuppetKind.BattleNpc && backend.ReadFacts(address).RawKind != (int)HumanPuppetKind.BattleNpc)
         {
             AbortInCall(puppet, "the copies left a kind other than BattleNpc");
@@ -349,7 +378,7 @@ public sealed class HumanPuppetHost
             return Failed(failure.Rule, "M-1 re-verify", failure.Detail);
         }
         readings.AddRange(callReadings);
-        return new(puppet.Handle, HumanPuppetRefusal.None, null, callReadings, copies);
+        return new(puppet.Handle, HumanPuppetRefusal.None, null, callReadings, copies) { KindRestore = kindRestore };
     }
 
     /// <summary>Asks the hidden puppet to draw, still at alpha 0, after re-verifying it.</summary>
@@ -1163,6 +1192,9 @@ public sealed class HumanPuppetHost
         public long? DrawObservedUpdate { get; set; }
         public long? DeletedUpdate { get; set; }
         public bool SlotCheckedAfterDeletion { get; set; }
+
+        /// <summary>R-8a: the kind and sub-kind read right after creation was proved, or null if unreadable.</summary>
+        public HumanPuppetKindPair? CreatedKind { get; set; }
 
         public void BindCreation(nint address, int comIndex)
         {
