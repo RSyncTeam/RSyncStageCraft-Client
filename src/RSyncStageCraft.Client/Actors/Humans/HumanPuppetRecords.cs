@@ -31,6 +31,9 @@ public enum HumanPuppetRefusal
     NotHidden,
     AlreadyAssigned,
     CustomizeNotFilled,
+
+    /// <summary>H1-c: GPose, a cutscene, a loading screen, no player, another RSC actor or a server session.</summary>
+    SceneNotQuiet,
 }
 
 /// <summary>The stop rule that latched. Nothing is retried after a stop.</summary>
@@ -54,8 +57,14 @@ public enum HumanPuppetStopRule
     /// <summary>CP-3 failed: Customize+ stays off for humans.</summary>
     CustomizePlus,
 
-    /// <summary>A provider stopped answering.</summary>
+    /// <summary>A provider stopped answering, was reloaded (H1-b), or a port call threw (H1-d).</summary>
     Provider,
+
+    /// <summary>H1-c: the scene stopped being quiet while a puppet was live.</summary>
+    LiveExit,
+
+    /// <summary>H1-a and H1-e: the puppet was targetable.</summary>
+    Hiding,
 }
 
 public sealed record HumanPuppetStopRecord(HumanPuppetStopRule Rule, string Step, string Detail, long Update);
@@ -70,7 +79,7 @@ public sealed record HumanParentMapReading(long Update, string Phase, int Global
 }
 
 /// <summary>What the puppet's fields were after a body copy (F0's record), without its name.</summary>
-public sealed record HumanPuppetCopyRecord(string Copy, int RawKind, ushort HomeWorld, uint NameId, ulong OwnerId, bool HasHumanModel, bool CustomizeFilled);
+public sealed record HumanPuppetCopyRecord(string Copy, int RawKind, ushort HomeWorld, uint NameId, ulong OwnerId, bool HasHumanModel, bool CustomizeFilled, bool Targetable);
 
 /// <summary>Something RSC made that is still there, recorded rather than resolved.</summary>
 public sealed record HumanPuppetResidue(HumanPuppetHandle Handle, string What, string Reason);

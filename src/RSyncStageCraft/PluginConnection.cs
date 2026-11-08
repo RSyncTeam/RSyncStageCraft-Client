@@ -38,6 +38,10 @@ internal sealed class PluginConnection
     private volatile bool actorsWereSuppressed;
     private readonly object gate = new();
     private string accessKey;
+#if RSC_DEVELOPMENT
+    // T3-1 only: null unless a Debug build is loaded as a dev plugin.
+    private readonly HumanPuppetT3Run? t31;
+#endif
 
     internal PluginConnection(
         IDalamudPluginInterface pluginInterface,
@@ -50,6 +54,9 @@ internal sealed class PluginConnection
         ICondition condition,
         ITargetManager targets,
         IObjectTable objects,
+#if RSC_DEVELOPMENT
+        ICommandManager commands,
+#endif
         Action<string> log)
     {
         ArgumentNullException.ThrowIfNull(objects);
@@ -63,6 +70,9 @@ internal sealed class PluginConnection
         ArgumentNullException.ThrowIfNull(condition);
         ArgumentNullException.ThrowIfNull(targets);
         ArgumentNullException.ThrowIfNull(log);
+#if RSC_DEVELOPMENT
+        ArgumentNullException.ThrowIfNull(commands);
+#endif
         this.targets = targets;
         // Entering GPose or a cutscene is treated like leaving the place for
         // actors only: they are freed and drawn again on return.
@@ -185,6 +195,27 @@ internal sealed class PluginConnection
             AppearanceCopy = null;
             log("RSC appearances are unavailable: the appearance cache folder could not be prepared.");
         }
+#if RSC_DEVELOPMENT
+        // T3-1 only (R-1, R-1b): a Debug build loaded as a dev plugin composes
+        // the human puppet runner here and nowhere else; Release has none of it.
+        if (DevelopmentBuild.ToolsEnabled(pluginInterface.IsDev))
+        {
+            try
+            {
+                t31 = new HumanPuppetT3Run(pluginInterface, commands, framework, clientState, condition, data,
+                    () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene),
+                    () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
+                        or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
+                    () => scenes.Current,
+                    log);
+            }
+            catch (Exception exception)
+            {
+                t31 = null;
+                log($"RSC T3-1 runner not loaded ({exception.GetType().Name}).");
+            }
+        }
+#endif
         framework.Update += OnFrameworkUpdate;
         location.Changed += OnLocationChanged;
         scenes.Observe(location.Current?.Location);
@@ -302,6 +333,10 @@ internal sealed class PluginConnection
         // From here on no copy makes a Glamourer call, whatever the
         // object host's state (a queued framework callback checks this).
         appearanceStopped = true;
+#if RSC_DEVELOPMENT
+        // T3-1 (S2): its command first, then its puppet, before the framework update and the actor host stop.
+        t31?.Shutdown();
+#endif
         location.Changed -= OnLocationChanged;
         framework.Update -= OnFrameworkUpdate;
         // Unload ends any drag; freeing the furniture below ends its preview.
@@ -377,6 +412,16 @@ internal sealed class PluginConnection
             log($"RSC actor controls error ({exception.GetType().Name}).");
         }
         ReportAbandonedActors();
+#if RSC_DEVELOPMENT
+        try
+        {
+            t31?.Tick();
+        }
+        catch (Exception exception)
+        {
+            log($"RSC T3-1 tick error ({exception.GetType().Name}).");
+        }
+#endif
     }
 
     /// <summary>The last GPose/cutscene observation (game thread), shown in the Actors window.</summary>

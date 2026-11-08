@@ -5,7 +5,8 @@ namespace RSyncStageCraft.Core.Actors.Humans;
 /// What a live object says about itself, read without writing anything.
 /// <see cref="Customize"/> is the 26-byte customize array, or null when it
 /// cannot be read. <see cref="NameTerminated"/>: the name buffer holds a NUL
-/// directly after <see cref="Name"/>.
+/// directly after <see cref="Name"/>. <see cref="Targetable"/>: the object's
+/// targetable bit is set (H1-e); a puppet must never have it.
 /// </summary>
 public sealed record HumanPuppetFacts(
     int GlobalIndex,
@@ -18,7 +19,8 @@ public sealed record HumanPuppetFacts(
     uint NameId,
     ulong OwnerId,
     bool HasHumanModel,
-    byte[]? Customize)
+    byte[]? Customize,
+    bool Targetable)
 {
     /// <summary>The game's "no owner" object id.</summary>
     public const ulong NoOwner = 0xE0000000;
@@ -32,8 +34,9 @@ public readonly record struct HumanPuppetScanEntry(int GlobalIndex, string Name,
 /// <summary>
 /// The native primitives a Debug human puppet needs. Every call is made on the
 /// game thread, and every decision is the host's. Nothing here sends anything
-/// to the game server. No implementation exists in the plugin: this candidate
-/// composes nothing.
+/// to the game server. The only implementation is the plugin's Debug-only
+/// T3-1 adapter. Every member is total there: it reports a failure value and
+/// never throws; the host still treats a throw as a stop (H1-d).
 /// </summary>
 public interface IHumanPuppetBackend
 {
@@ -60,9 +63,17 @@ public interface IHumanPuppetBackend
     /// <summary>
     /// B-2: copies <paramref name="source"/>'s character into the puppet
     /// (the source is only read). With the puppet as its own source this is
-    /// the self-copy. Both parent-map copy hooks run inside it.
+    /// the self-copy. Both parent-map copy hooks run inside it. R-3: the copy
+    /// from another object uses only the position flag (which includes the
+    /// rotation); the self-copy uses no flag.
     /// </summary>
     void CopyCharacter(nint puppet, nint source);
+
+    /// <summary>
+    /// H1-a (R-7), on the proved puppet only: clears the targetable bit and
+    /// hides the nameplate. Nothing else is written.
+    /// </summary>
+    void PrepareHidden(nint puppet);
 
     /// <summary>
     /// SI-1's identity write, and nothing else: the name buffer (name and NUL)
@@ -96,8 +107,8 @@ public interface IHumanPuppetBackend
 
 /// <summary>
 /// Both cutscene-parent maps (r5 §7.2), each through its owner's public call.
-/// Getters return null when the provider cannot answer. This candidate has no
-/// IPC binding: runtime IPC stays separately gated.
+/// Getters return null when the provider cannot answer. The only binding is
+/// the plugin's Debug-only T3-1 adapter; running it stays separately gated.
 /// </summary>
 public interface IHumanParentMapPort
 {
@@ -110,6 +121,9 @@ public interface IHumanParentMapPort
 
     /// <summary>Both <c>CustomizePlus.GameState.Set/GetCutsceneParentIndex</c> subscribers resolve.</summary>
     bool CustomizePlusParentIpcPresent { get; }
+
+    /// <summary><c>CustomizePlus.General.IsValid</c> answered true; false when it is false or did not answer.</summary>
+    bool CustomizePlusValid { get; }
 
     bool SetPenumbraParent(int globalIndex, int parent);
 
@@ -156,8 +170,12 @@ public interface IHumanPenumbraPort
 {
     HumanCollectionReading? GetCollectionForObject(int globalIndex);
 
-    /// <summary>The collection set for a type, or null when none is set.</summary>
-    Guid? GetCollection(HumanCollectionRole role);
+    /// <summary>
+    /// The collection set for a type. True with null: the provider answered
+    /// that none is set. False: the role has no collection type, or the read
+    /// failed; the host stops (Provider), never treating it as "not set".
+    /// </summary>
+    bool TryGetCollection(HumanCollectionRole role, out Guid? collection);
 
     /// <summary>A new temporary collection, or null when its id did not come back.</summary>
     Guid? CreateTemporaryCollection(string name);
