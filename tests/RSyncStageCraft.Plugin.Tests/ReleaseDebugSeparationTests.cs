@@ -309,6 +309,32 @@ public sealed class ReleaseDebugSeparationTests
         Assert.Equal(Debug, Plugin.ReferencedTypeNames.Contains("Dalamud.Game.Command.CommandInfo"));
     }
 
+    private const string Hv1RunType = "RSyncStageCraft.HumanActorBaselineRun";
+    private const string Hv1NativeType = "RSyncStageCraft.Adapters.HumanActorNativeBackend";
+    private const string Hv1BaselineType = HumanPuppetNamespace + "HumanActorBaseline";
+
+    [Fact]
+    public void TheHv1RunnerItsCommandAndItsAdapterExistOnlyInDebug()
+    {
+        // HV-1: positive absence in Release, and in Debug one composition
+        // site: the connection constructs the runner, and only the runner
+        // constructs the native adapter and the baseline.
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        Assert.Equal(Debug, client.GetType(Hv1BaselineType) is not null);
+        Assert.Equal(Debug, client.GetType(HumanPuppetNamespace + "IHumanActorBackend") is not null);
+        Assert.Equal(Debug, Plugin.HasType(Hv1RunType));
+        Assert.Equal(Debug, Plugin.HasType(Hv1NativeType));
+        Assert.Equal(Debug, Plugin.UserStrings.Contains("/rschv1"));
+        if (!DebugBuild())
+            return;
+        Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
+            Plugin.Callers(target => target.Type == Hv1RunType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(Hv1RunType, ".ctor") },
+            Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(Hv1RunType, ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor").ToArray());
+    }
+
     [Theory]
     [InlineData("ApplyState")]
     [InlineData("ApplyStateName")]
