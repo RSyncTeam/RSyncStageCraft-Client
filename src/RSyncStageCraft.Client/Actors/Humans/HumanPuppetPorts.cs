@@ -28,6 +28,13 @@ public sealed record HumanPuppetFacts(
     public const int CustomizeLength = 26;
 }
 
+/// <summary>
+/// R-8a: an object's kind and sub-kind, the two bytes the copy from the
+/// player changes. Recorded at creation and, only on a BattleNpc request,
+/// written back once after the copies.
+/// </summary>
+public readonly record struct HumanPuppetKindPair(byte Kind, byte SubKind);
+
 /// <summary>One object-table entry's identity for the O1 scan, as all three plugins see it.</summary>
 public readonly record struct HumanPuppetScanEntry(int GlobalIndex, string Name, ushort HomeWorld);
 
@@ -59,6 +66,17 @@ public interface IHumanPuppetBackend
     nint LocalPlayer { get; }
 
     HumanPuppetFacts ReadFacts(nint address);
+
+    /// <summary>R-8a: the object's kind and sub-kind, read without writing, or null when they cannot be read.</summary>
+    HumanPuppetKindPair? ReadKind(nint address);
+
+    /// <summary>
+    /// R-8a, on the proved puppet only: writes back the kind and sub-kind its
+    /// creation produced, and nothing else. The host calls it at most once per
+    /// spawn, after the self-copy and before any hiding, map or identity write,
+    /// with checks 1–5 immediately before it, and reads both bytes back.
+    /// </summary>
+    void RestoreKind(nint puppet, HumanPuppetKindPair kind);
 
     /// <summary>
     /// B-2: copies <paramref name="source"/>'s character into the puppet

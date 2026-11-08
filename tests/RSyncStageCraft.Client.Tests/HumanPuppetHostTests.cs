@@ -37,6 +37,15 @@ public sealed class HumanPuppetHostTests
         return (host, result.Handle!.Value);
     }
 
+    // As live, the human model is read only once a draw object exists, so
+    // isolation and the assignment run after the draw request.
+    private (HumanPuppetHost Host, HumanPuppetHandle Handle) Drawn()
+    {
+        var (host, handle) = Spawned();
+        Assert.True(host.RequestDraw(handle).Done);
+        return (host, handle);
+    }
+
     private static int IndexOfCall(List<string> calls, string call)
     {
         var index = calls.IndexOf(call);
@@ -254,19 +263,6 @@ public sealed class HumanPuppetHostTests
     }
 
     [Fact]
-    public void ACopyThatLeavesThePlayerKindStopsABattleNpcSpawnAndDeletesIt()
-    {
-        scene.CopyCopiesKind = true;
-        var host = Ready();
-        var result = host.Spawn();
-        Assert.False(result.Spawned);
-        Assert.Equal(HumanPuppetStopRule.S5Identity, result.Stop!.Rule);
-        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("write identity", StringComparison.Ordinal));
-        Assert.Contains("delete 200", scene.Calls);
-        Assert.False(scene.Exists(200));
-    }
-
-    [Fact]
     public void AFailedDetachStopsBeforeTheScanAndTheIdentityWrite()
     {
         scene.FailPenumbraSet = true;
@@ -462,7 +458,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void IsolationHoldsWhenNoIndividualEntryAndTheExpectedCollectionApply()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         Assert.True(host.VerifyIsolation(handle).Done);
         // The clan-and-gender and gender types were asked first; Default answered.
         var asked = scene.Calls.Where(call => call.StartsWith("collection ", StringComparison.Ordinal) && !call.StartsWith("collection for", StringComparison.Ordinal)).ToArray();
@@ -472,7 +468,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void IsolationIsNotReadAgainstTheExpectedCollectionOnceAssigned()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         Assert.True(host.AssignTemporaryCollection(handle).Done);
         Assert.Equal(HumanPuppetRefusal.AlreadyAssigned, host.VerifyIsolation(handle).Refusal);
         Assert.Null(host.Stop);
@@ -481,7 +477,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void AnExactIndividualEntryIsACollision()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         scene.IndividualSet = true;
         Assert.Equal(HumanPuppetStopRule.Collision, host.VerifyIsolation(handle).Stop!.Rule);
         Assert.False(scene.Exists(200));
@@ -490,7 +486,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void AnUnexpectedEffectiveCollectionFailsIsolation()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         scene.EffectiveOverride = Guid.NewGuid();
         Assert.Equal(HumanPuppetStopRule.S4ParentMapOrIsolation, host.VerifyIsolation(handle).Stop!.Rule);
     }
@@ -498,7 +494,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void AnUnfilledCustomizeArrayDefersTheChecks()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         scene.At(200).Customize![0] = 0;
         Assert.Equal(HumanPuppetRefusal.CustomizeNotFilled, host.VerifyIsolation(handle).Refusal);
         Assert.Equal(HumanPuppetRefusal.CustomizeNotFilled, host.AssignTemporaryCollection(handle).Refusal);
@@ -531,7 +527,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void TheTemporaryAssignmentIsNonForcedAndVerified()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         Assert.True(host.AssignTemporaryCollection(handle).Done);
         var created = IndexOfCall(scene.Calls, "create collection");
         Assert.True(IndexOfCall(scene.Calls, "collection for 200") < created);
@@ -548,7 +544,7 @@ public sealed class HumanPuppetHostTests
     public void ALostCollectionIdIsAStopWithResidue()
     {
         scene.LoseCollectionId = true;
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         var outcome = host.AssignTemporaryCollection(handle);
         Assert.Equal(HumanPuppetStopRule.S6Residue, outcome.Stop!.Rule);
         Assert.Contains(host.Residue, item => item.Reason == "collection receipt lost");
@@ -568,6 +564,7 @@ public sealed class HumanPuppetHostTests
         var host = Ready();
         host.NameSource = _ => FixedName;
         var handle = host.Spawn().Handle!.Value;
+        Assert.True(host.RequestDraw(handle).Done);
         scene.Injected[57] = new(57, FixedName, HumanPuppetWorld.AnyWorld);
         Assert.Equal(HumanPuppetStopRule.Collision, host.AssignTemporaryCollection(handle).Stop!.Rule);
         Assert.DoesNotContain("assign 200", scene.Calls);
@@ -578,7 +575,7 @@ public sealed class HumanPuppetHostTests
     public void ARefusedAssignmentIsACollisionAndTheCollectionIsDeleted()
     {
         scene.AssignResult = HumanAssignmentResult.Refused;
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         Assert.Equal(HumanPuppetStopRule.Collision, host.AssignTemporaryCollection(handle).Stop!.Rule);
         Assert.DoesNotContain("unassign 200", scene.Calls);
         Assert.Contains("delete collection", scene.Calls);
@@ -602,7 +599,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void RemovalRemovesTheAssignmentBeforeTheCollectionAndDeletesOnlyAfterTPlusEight()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         host.OnFrameworkUpdate(2);
         Assert.True(host.AssignTemporaryCollection(handle).Done);
         host.OnFrameworkUpdate(3);
@@ -629,6 +626,7 @@ public sealed class HumanPuppetHostTests
     {
         var host = Ready(limit: 1);
         var handle = host.Spawn().Handle!.Value;
+        Assert.True(host.RequestDraw(handle).Done);
         Assert.True(host.AssignTemporaryCollection(handle).Done);
         host.Remove(handle);
         Assert.Equal(HumanPuppetRefusal.AtCapacity, host.Spawn().Refusal);
@@ -637,7 +635,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void AnAssignmentThatCannotBeRemovedKeepsTheCollectionUnderD1()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         Assert.True(host.AssignTemporaryCollection(handle).Done);
         scene.RemoveAssignmentFails = true;
         host.Remove(handle);
@@ -649,7 +647,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void AnUnverifiedMapWithAnAssignmentMakesNoByIndexCall()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         Assert.True(host.AssignTemporaryCollection(handle).Done);
         scene.SetEntries(200, 0);
         scene.FailPenumbraSet = true;
@@ -665,7 +663,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public void AnUnverifiedIdentityWithAnAssignmentMakesNoByIndexCall()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         Assert.True(host.AssignTemporaryCollection(handle).Done);
         scene.At(200).World = FakeHumanScene.PlayerWorld;
         host.Remove(handle);
@@ -776,7 +774,7 @@ public sealed class HumanPuppetHostTests
     [Fact]
     public async Task UnloadNeverDeletesInsideD2()
     {
-        var (host, handle) = Spawned();
+        var (host, handle) = Drawn();
         Assert.True(host.AssignTemporaryCollection(handle).Done);
         var report = await host.UnloadAsync(action =>
         {

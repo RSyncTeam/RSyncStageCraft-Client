@@ -37,9 +37,10 @@ namespace RSyncStageCraft.Adapters;
 /// call guard against that. Game thread only. The copy flags are
 /// R-3's (the position flag, which includes the rotation, for the copy from
 /// the player; none for the self-copy) and the hiding writes are R-7's (the
-/// targetable bit and the nameplate). There is no kind write (R-8 is not
-/// approved): a request for the player kind writes nothing, so the host's
-/// re-verify stops.
+/// targetable bit and the nameplate). The only kind write is R-8a's
+/// <see cref="RestoreKind"/>, which writes back the kind and sub-kind the
+/// host recorded at creation; there is no other kind write: a request for the
+/// player kind writes nothing, so the host's re-verify stops.
 /// </summary>
 internal sealed unsafe class HumanPuppetNativeBackend : IHumanPuppetBackend
 {
@@ -171,6 +172,30 @@ internal sealed unsafe class HumanPuppetNativeBackend : IHumanPuppetBackend
         }
     }
 
+    public HumanPuppetKindPair? ReadKind(nint address)
+    {
+        try
+        {
+            var gameObject = (GameObjectStruct*)address;
+            if (gameObject == null || !gameObject->IsCharacter())
+                return null;
+            return new((byte)gameObject->ObjectKind, gameObject->SubKind);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public void RestoreKind(nint puppet, HumanPuppetKindPair kind)
+    {
+        var gameObject = (GameObjectStruct*)puppet;
+        if (gameObject == null)
+            return;
+        gameObject->ObjectKind = (FFXIVClientStructs.FFXIV.Client.Game.Object.ObjectKind)kind.Kind;
+        gameObject->SubKind = kind.SubKind;
+    }
+
     public void CopyCharacter(nint puppet, nint source)
     {
         var target = (GameCharacter*)puppet;
@@ -192,7 +217,7 @@ internal sealed unsafe class HumanPuppetNativeBackend : IHumanPuppetBackend
     public void WriteIdentity(nint puppet, string name, ushort homeWorld, bool writePlayerKind, bool clearNameIdAndOwner)
     {
         var character = (GameCharacter*)puppet;
-        // No kind write in T3-1 (R-8 is not approved): write nothing, so the re-verify stops.
+        // No player-kind write in T3-1 (R-8a restores only the created kind, in RestoreKind): write nothing, so the re-verify stops.
         if (character == null || writePlayerKind || string.IsNullOrEmpty(name))
             return;
         var gameObject = (GameObjectStruct*)puppet;

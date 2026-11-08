@@ -227,6 +227,29 @@ public sealed class ReleaseDebugSeparationTests
         Assert.Empty(Plugin.ReferenceCallers(target => target.Type == HumanPuppetHostType && target.Name == "AssignTemporaryCollection"));
     }
 
+    [Fact]
+    public void TheKindRestoreExistsOnlyInDebugAndOnlyTheSpawnCallsIt()
+    {
+        // R-8a: the only kind restore is the human puppet backend's. Release
+        // has no restore member, implementation or caller; in Debug only the
+        // host's spawn calls it, only the T3-1 native backend implements it,
+        // and no plugin method calls it.
+        const string backend = HumanPuppetNamespace + "IHumanPuppetBackend";
+        const string native = "RSyncStageCraft.Adapters.HumanPuppetNativeBackend";
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        Assert.Equal(Debug, client.GetType(backend)?.GetMethod("RestoreKind") is not null);
+        Assert.Equal(Debug, client.GetType(HumanPuppetNamespace + "HumanPuppetKindPair") is not null);
+        Assert.Equal(Debug, Plugin.HasMethod(native, "RestoreKind"));
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Name == "RestoreKind"));
+        if (!DebugBuild())
+        {
+            Assert.Empty(Client.Callers(target => target.Name == "RestoreKind"));
+            return;
+        }
+        Assert.Equal(new[] { new MethodName(HumanPuppetHostType, "SpawnCore") },
+            Client.Callers(target => target.Name == "RestoreKind").ToArray());
+    }
+
     [Theory]
     [InlineData("CreateTemporaryCollection")]
     [InlineData("AssignTemporaryCollection")]
