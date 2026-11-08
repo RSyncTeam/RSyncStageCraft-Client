@@ -22,6 +22,10 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
     [PluginService] internal static ITextureProvider TextureProvider { get; private set; } = null!;
     [PluginService] internal static ITargetManager TargetManager { get; private set; } = null!;
+#if RSC_DEVELOPMENT
+    // T3-1's console command only (Debug build, dev plugin).
+    [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
+#endif
 
     public Plugin()
     {
@@ -50,6 +54,9 @@ public sealed class Plugin : IDalamudPlugin
                 Condition,
                 TargetManager,
                 ObjectTable,
+#if RSC_DEVELOPMENT
+                CommandManager,
+#endif
                 message => Log.Information(message));
             Connection = connection;
             Observations.Record("bootstrap.connection-ready");

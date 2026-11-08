@@ -95,6 +95,57 @@ public readonly record struct HumanPuppetWorld(ushort WorldId, bool F11Verified)
     public bool IsUsable => F11Verified && WorldId is not 0 and not AnyWorld;
 }
 
+/// <summary>One <c>World</c> row as the game data has it, read without writing (W-2's start-up check).</summary>
+public sealed record HumanPuppetWorldRow(uint RowId, string InternalName, string Name, uint DataCenter, bool IsPublic);
+
+/// <summary>
+/// W-2 for T3-1: the World row the owner selected after F11 (game version
+/// 2026.10.16.0000.0000), compiled into the Debug build only. The selection is
+/// experimental: nothing here claims the row behaves well at run time or that
+/// a later game version keeps it. At start-up the row is read again; any
+/// difference from the selected identity, a public row, or a row equal to the
+/// player's own world refuses. There is no fallback.
+/// </summary>
+public static class HumanPuppetW2
+{
+    public const ushort WorldId = 1;
+    public const string ExpectedInternalName = "reserved1";
+    public const string ExpectedName = "Dev";
+    public const uint ExpectedDataCenter = 0;
+
+    /// <summary>
+    /// The start-up check of the row (null when the row could not be read).
+    /// Null on success; otherwise why the row is refused.
+    /// </summary>
+    public static string? RowMismatch(HumanPuppetWorldRow? row)
+    {
+        if (row is null)
+            return "the selected World row could not be read";
+        if (row.RowId != WorldId)
+            return "the World row read is not the selected row";
+        if (!string.Equals(row.InternalName, ExpectedInternalName, StringComparison.Ordinal))
+            return "the selected World row's internal name changed";
+        if (!string.Equals(row.Name, ExpectedName, StringComparison.Ordinal))
+            return "the selected World row's name changed";
+        if (row.DataCenter != ExpectedDataCenter)
+            return "the selected World row's data centre changed";
+        if (row.IsPublic)
+            return "the selected World row is public";
+        return null;
+    }
+
+    /// <summary>The player's own world must differ from W-2 (H-3: never a silent W-1). Null when it does.</summary>
+    public static string? PlayerWorldMismatch(ushort? playerHomeWorld) => playerHomeWorld switch
+    {
+        null => "the player's home world could not be read",
+        WorldId => "the player's home world is the selected World row",
+        _ => null,
+    };
+
+    /// <summary>The host's world: F11-verified only when the row check passed.</summary>
+    public static HumanPuppetWorld World(HumanPuppetWorldRow? row) => new(WorldId, RowMismatch(row) is null);
+}
+
 /// <summary>The object kind a spawn records at setup (P5-6): F1 decides whether the player kind is needed.</summary>
 public enum HumanPuppetKind
 {

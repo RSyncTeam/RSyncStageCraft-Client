@@ -6,16 +6,18 @@ namespace RSyncStageCraft.Core.Actors.Humans;
 /// <summary>
 /// The stage-3 Debug host for hidden human puppets with vanilla skeletons
 /// (decision sheet r2, owner decisions H-0 to H-12). Compiled only under
-/// <c>RSC_DEVELOPMENT</c>, so a Release build has none of it, and composed by
-/// nothing: runtime use, IPC and every experiment need their own approval.
+/// <c>RSC_DEVELOPMENT</c>, so a Release build has none of it. Only the
+/// plugin's Debug-only T3-1 runner composes it; running that, IPC and every
+/// experiment need their own approval.
 ///
 /// <para>Every method except <see cref="TrackWork"/> and <see cref="UnloadAsync"/>
 /// runs on the game thread. Its scope:</para>
 /// <list type="bullet">
 /// <item>M-1 in one call (<see cref="Spawn"/>): create, B-2 copy from the
-/// player, self-copy, both maps to −1 and read back, the O1 scan, the
-/// identity write, then both maps and the identity re-verified, at alpha 0,
-/// with no draw and no by-index call.</item>
+/// player, self-copy, untargetable with the nameplate hidden (H1-a), both
+/// maps to −1 and read back, the O1 scan, the identity write, then both maps,
+/// the identity and the targetable bit re-verified, at alpha 0, with no draw
+/// and no by-index call.</item>
 /// <item>M-2 and F2 (<see cref="CaptureBaseline"/>, <see cref="OnFrameworkUpdate"/>):
 /// every puppet's maps on every update, and its slot after deletion.</item>
 /// <item>P5 checks 1–7, P6(a) and P16 (<see cref="VerifyIsolation"/>), and H-5's
@@ -27,11 +29,21 @@ namespace RSyncStageCraft.Core.Actors.Humans;
 /// deletion call, so P13 steps 4, 5, 9 and 10 and every P14 path are absent.
 /// Every stop latches: no spawn, draw or assignment follows, and nothing is
 /// retried. Lost receipts are stops with the residue recorded (H-6).</para>
+/// <para>T3-1 amendments (H1, an explicit T3-1-only freeze exception): the
+/// targetable bit is read back after H1-a, before the draw and on every update
+/// (H1-e); a provider generation change while a puppet is live is a Provider
+/// stop (H1-b); a scene that is not quiet refuses a spawn and, while a puppet
+/// is live, stops (H1-c); and a port call that throws inside a host call is a
+/// latched Provider stop with clean-up, the new object being tracked before
+/// its first read (H1-d).</para>
 /// </summary>
 public sealed class HumanPuppetHost
 {
     /// <summary>D2 (r5b): a puppet's object may be deleted only in an update strictly after t + 8.</summary>
     public const int DeletionDelayUpdates = 8;
+
+    /// <summary>F2-R item 1's phase when a provider did not answer after the deletion (H1-b).</summary>
+    public const string NotMeasuredPhase = "F2-R item 1 not measured";
 
     private readonly IHumanPuppetBackend backend;
     private readonly IHumanParentMapPort maps;
@@ -40,6 +52,8 @@ public sealed class HumanPuppetHost
     private readonly HumanPuppetWorld world;
     private readonly HumanPuppetKind kind;
     private readonly Func<int> otherRscActors;
+    private readonly Func<long> providerGeneration;
+    private readonly Func<string?> liveExit;
     private readonly int puppetLimit;
     private readonly Dictionary<HumanPuppetHandle, Puppet> puppets = [];
     private readonly HashSet<string> usedNames = new(StringComparer.OrdinalIgnoreCase);
@@ -49,10 +63,13 @@ public sealed class HumanPuppetHost
     private readonly object workGate = new();
     private readonly List<Task> work = [];
     private bool customizePlusChecked;
+    private long customizePlusCheckedGeneration;
     private bool unloading;
     private long update;
 
     /// <param name="otherRscActors">Every other RSC actor in the scene; they count toward the eight.</param>
+    /// <param name="providerGeneration">H1-b: changes whenever Penumbra, Glamourer or Customize+ loads, unloads or reinitializes.</param>
+    /// <param name="liveExit">H1-c: null while the scene is quiet; otherwise why it is not.</param>
     /// <param name="puppetLimit">At most <see cref="ActorCapacityPolicy.ActiveMaximumActorsPerScene"/>.</param>
     public HumanPuppetHost(
         IHumanPuppetBackend backend,
@@ -62,6 +79,8 @@ public sealed class HumanPuppetHost
         HumanPuppetWorld world,
         HumanPuppetKind kind,
         Func<int> otherRscActors,
+        Func<long> providerGeneration,
+        Func<string?> liveExit,
         int puppetLimit = 1)
     {
         this.backend = backend ?? throw new ArgumentNullException(nameof(backend));
@@ -69,6 +88,8 @@ public sealed class HumanPuppetHost
         this.penumbra = penumbra ?? throw new ArgumentNullException(nameof(penumbra));
         this.glamourer = glamourer ?? throw new ArgumentNullException(nameof(glamourer));
         this.otherRscActors = otherRscActors ?? throw new ArgumentNullException(nameof(otherRscActors));
+        this.providerGeneration = providerGeneration ?? throw new ArgumentNullException(nameof(providerGeneration));
+        this.liveExit = liveExit ?? throw new ArgumentNullException(nameof(liveExit));
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
         if (puppetLimit is < 1 or > ActorCapacityPolicy.ActiveMaximumActorsPerScene)
@@ -117,6 +138,18 @@ public sealed class HumanPuppetHost
     /// </summary>
     public HumanPuppetOutcome CheckCustomizePlus()
     {
+        try
+        {
+            return CheckCustomizePlusCore();
+        }
+        catch (Exception exception)
+        {
+            return HumanPuppetOutcome.Stopped(Fault("CP-3", exception));
+        }
+    }
+
+    private HumanPuppetOutcome CheckCustomizePlusCore()
+    {
         if (Stop is { } stopped)
             return HumanPuppetOutcome.Stopped(stopped);
         if (!maps.CustomizePlusLoaded)
@@ -125,6 +158,10 @@ public sealed class HumanPuppetHost
             return HumanPuppetOutcome.Stopped(Latch(HumanPuppetStopRule.CustomizePlus, "CP-3", "the Customize+ IPC version is not (6, 4)"));
         if (!maps.CustomizePlusParentIpcPresent)
             return HumanPuppetOutcome.Stopped(Latch(HumanPuppetStopRule.CustomizePlus, "CP-3", "the Customize+ parent IPC is absent"));
+        if (!maps.CustomizePlusValid)
+            return HumanPuppetOutcome.Stopped(Latch(HumanPuppetStopRule.CustomizePlus, "CP-3", "Customize+ does not report itself valid"));
+        // H1-b: CP-3 holds only under the provider generation it was checked in.
+        customizePlusCheckedGeneration = providerGeneration();
         customizePlusChecked = true;
         return HumanPuppetOutcome.Ok;
     }
@@ -149,8 +186,21 @@ public sealed class HumanPuppetHost
     /// world is not F11-verified (no W-1 fallback), or the eight-actor total
     /// would be exceeded. After creation, any failure hides the puppet, makes
     /// no by-index call, deletes it if it is still provably RSC's, and stops.
+    /// A port call that throws is a Provider stop with the same clean-up (H1-d).
     /// </summary>
     public HumanPuppetSpawnResult Spawn()
+    {
+        try
+        {
+            return SpawnCore();
+        }
+        catch (Exception exception)
+        {
+            return new(null, HumanPuppetRefusal.None, Fault("spawn", exception), [], []);
+        }
+    }
+
+    private HumanPuppetSpawnResult SpawnCore()
     {
         var refusal = SpawnRefusal();
         if (refusal != HumanPuppetRefusal.None)
@@ -160,7 +210,8 @@ public sealed class HumanPuppetHost
         var copies = new List<HumanPuppetCopyRecord>();
         var name = FreshName();
         usedNames.Add(name);
-        var puppet = new Puppet(new(Guid.NewGuid()), name, world.WorldId, HumanPuppetKey.Create(), kind);
+        // H1-b: the generation this puppet lives under; any change while it is live stops.
+        var puppet = new Puppet(new(Guid.NewGuid()), name, world.WorldId, HumanPuppetKey.Create(), kind, providerGeneration());
 
         HumanPuppetSpawnResult Failed(HumanPuppetStopRule rule, string step, string detail)
         {
@@ -183,24 +234,39 @@ public sealed class HumanPuppetHost
             return Failed(after.SequenceEqual(before) ? HumanPuppetStopRule.Ownership : HumanPuppetStopRule.S6Residue,
                 "create", "the allocator returned no new COM slot");
         }
-        var address = backend.ComObjectByIndex(comIndex);
-        if (address == 0 || Array.IndexOf(before, address) >= 0 || backend.ComIndexOf(address) != comIndex || backend.ComEntry(comIndex) != address)
+        nint address;
+        bool proved;
+        try
+        {
+            address = backend.ComObjectByIndex(comIndex);
+            proved = address != 0 && Array.IndexOf(before, address) < 0 && backend.ComIndexOf(address) == comIndex && backend.ComEntry(comIndex) == address;
+        }
+        catch
+        {
+            // H1-d: a new object exists but is not yet tracked; it is residue, never deleted.
+            residue.Add(new(puppet.Handle, "the object in the returned COM slot", "a port call threw before its creation was proved"));
+            throw;
+        }
+        if (!proved)
         {
             residue.Add(new(puppet.Handle, "the object in the returned COM slot", "its creation could not be proved"));
             return Failed(HumanPuppetStopRule.S6Residue, "create", "the returned object could not be proved new");
         }
+        // H1-d: tracked before its first read, so a throw from here on still
+        // reaches clean-up. Until its facts are bound, only the creation slot
+        // proves it is RSC's, and it has had no write.
+        puppet.BindCreation(address, comIndex);
+        puppets[puppet.Handle] = puppet;
         var created = backend.ReadFacts(address);
         if (!HumanPuppetSlotRange.Contains(created.GlobalIndex) || backend.ObjectTableEntry(created.GlobalIndex) != address || address == backend.LocalPlayer)
         {
-            puppet.Bind(address, comIndex, created);
-            puppets[puppet.Handle] = puppet;
+            puppet.BindFacts(created);
             // No field write outside 200–439 (SI-1 item 1): it was never drawn, so it is only deleted.
             puppet.Phase = HumanPuppetPhase.AwaitingDeletion;
             DeleteObject(puppet);
             return Failed(HumanPuppetStopRule.Ownership, "create", "the new object is outside 200–439");
         }
-        puppet.Bind(address, comIndex, created);
-        puppets[puppet.Handle] = puppet;
+        puppet.BindFacts(created);
         backend.SetAlpha(address, 0f);
 
         // 2–3. B-2: copy from the player, then the self-copy; re-prove after each.
@@ -219,8 +285,30 @@ public sealed class HumanPuppetHost
                 return Failed(HumanPuppetStopRule.Ownership, "copy", mismatch);
             }
             var facts = backend.ReadFacts(address);
-            copies.Add(new(copy, facts.RawKind, facts.HomeWorld, facts.NameId, facts.OwnerId, facts.HasHumanModel, CustomizeFilled(facts)));
+            copies.Add(new(copy, facts.RawKind, facts.HomeWorld, facts.NameId, facts.OwnerId, facts.HasHumanModel, CustomizeFilled(facts), facts.Targetable));
             backend.SetAlpha(address, 0f);
+        }
+
+        // R-8 is not approved: a kind other than BattleNpc after the copies
+        // stops here, before any hiding, map or identity write, and is never corrected.
+        if (kind == HumanPuppetKind.BattleNpc && backend.ReadFacts(address).RawKind != (int)HumanPuppetKind.BattleNpc)
+        {
+            AbortInCall(puppet, "the copies left a kind other than BattleNpc");
+            return Failed(HumanPuppetStopRule.S5Identity, "copy", "the kind after the copies is not BattleNpc");
+        }
+
+        // H1-a (R-7): after the last copy, untargetable with the nameplate
+        // hidden, on the proved object only; then the bit is read back.
+        if (OwnershipMismatch(puppet) is { } beforeHiding)
+        {
+            Forget(puppet, $"before hiding: {beforeHiding}");
+            return Failed(HumanPuppetStopRule.Ownership, "hide", beforeHiding);
+        }
+        backend.PrepareHidden(address);
+        if (backend.ReadFacts(address).Targetable)
+        {
+            AbortInCall(puppet, "the puppet stayed targetable");
+            return Failed(HumanPuppetStopRule.Hiding, "hide", "the puppet is still targetable after hiding");
         }
 
         // 4–5. Both maps to −1, each read back through its owner.
@@ -242,8 +330,8 @@ public sealed class HumanPuppetHost
         var beforeWrite = backend.ReadFacts(address);
         if (kind == HumanPuppetKind.BattleNpc && beforeWrite.RawKind != (int)HumanPuppetKind.BattleNpc)
         {
-            AbortInCall(puppet, "the copies left a kind other than BattleNpc");
-            return Failed(HumanPuppetStopRule.S5Identity, "identity", "the kind after the copies is not BattleNpc");
+            AbortInCall(puppet, "the kind changed after the copies");
+            return Failed(HumanPuppetStopRule.S5Identity, "identity", "the kind before the identity write is not BattleNpc");
         }
         var clear = beforeWrite.NameId != 0 || beforeWrite.OwnerId != HumanPuppetFacts.NoOwner;
         // SI-1 item 1: checks 1–5 immediately before the write.
@@ -265,7 +353,9 @@ public sealed class HumanPuppetHost
     }
 
     /// <summary>Asks the hidden puppet to draw, still at alpha 0, after re-verifying it.</summary>
-    public HumanPuppetOutcome RequestDraw(HumanPuppetHandle handle)
+    public HumanPuppetOutcome RequestDraw(HumanPuppetHandle handle) => Guarded("draw", () => RequestDrawCore(handle));
+
+    private HumanPuppetOutcome RequestDrawCore(HumanPuppetHandle handle)
     {
         if (Guard(handle, out var puppet) is { } refused)
             return refused;
@@ -285,7 +375,9 @@ public sealed class HumanPuppetHost
     /// and P16, the effective collection equals the expected one, never by
     /// the <c>Yourself</c> path. Reads only; a failure stops (S4).
     /// </summary>
-    public HumanPuppetOutcome VerifyIsolation(HumanPuppetHandle handle)
+    public HumanPuppetOutcome VerifyIsolation(HumanPuppetHandle handle) => Guarded("isolation", () => VerifyIsolationCore(handle));
+
+    private HumanPuppetOutcome VerifyIsolationCore(HumanPuppetHandle handle)
     {
         if (Guard(handle, out var puppet) is { } refused)
             return refused;
@@ -371,7 +463,9 @@ public sealed class HumanPuppetHost
     /// delete the object only in an update strictly after t + 8 from the
     /// latest change (D2); until then it stays hidden and keeps its slot.
     /// </summary>
-    public HumanPuppetOutcome Remove(HumanPuppetHandle handle)
+    public HumanPuppetOutcome Remove(HumanPuppetHandle handle) => Guarded("remove", () => RemoveCore(handle));
+
+    private HumanPuppetOutcome RemoveCore(HumanPuppetHandle handle)
     {
         if (!puppets.TryGetValue(handle, out var puppet))
             return HumanPuppetOutcome.Refused(HumanPuppetRefusal.UnknownPuppet);
@@ -394,6 +488,18 @@ public sealed class HumanPuppetHost
         if (frameworkUpdate <= update)
             throw new ArgumentOutOfRangeException(nameof(frameworkUpdate), "updates must increase");
         update = frameworkUpdate;
+        try
+        {
+            Tick();
+        }
+        catch (Exception exception)
+        {
+            Fault("F2 tick", exception);
+        }
+    }
+
+    private void Tick()
+    {
         bool cleanUpAllowed;
         lock (workGate)
             cleanUpAllowed = !unloading;
@@ -423,9 +529,15 @@ public sealed class HumanPuppetHost
                     break;
                 case HumanPuppetPhase.Deleted when puppet.DeletedUpdate < update && !puppet.SlotCheckedAfterDeletion:
                     puppet.SlotCheckedAfterDeletion = true;
+                    // H1-b: measured only when both providers answer; otherwise recorded as not measured.
                     var after = Read(puppet.GlobalIndex, "F2-R item 1");
+                    if (after.Penumbra is null || after.CustomizePlus is null)
+                    {
+                        readings.Add(after with { Phase = NotMeasuredPhase });
+                        break;
+                    }
                     readings.Add(after);
-                    if (after.Penumbra != -1 || (maps.CustomizePlusLoaded && after.CustomizePlus != -1))
+                    if (after.Penumbra != -1 || after.CustomizePlus != -1)
                         Latch(HumanPuppetStopRule.S4ParentMapOrIsolation, "F2-R item 1", "a deleted puppet's slot is not −1 in both maps");
                     break;
             }
@@ -504,7 +616,7 @@ public sealed class HumanPuppetHost
         await OnGameThread("hide and revalidate", () =>
         {
             foreach (var puppet in puppets.Values.Where(puppet => puppet.Phase is HumanPuppetPhase.Hidden or HumanPuppetPhase.DrawRequested).ToArray())
-                HideIfOwned(puppet, "unload");
+                OrResidue(puppet, "unload hide", () => HideIfOwned(puppet, "unload"));
         }).ConfigureAwait(false);
         order.Add("hide and revalidate");
 
@@ -527,21 +639,24 @@ public sealed class HumanPuppetHost
             foreach (var puppet in puppets.Values.ToArray())
             {
                 var deletedBefore = puppet.Phase == HumanPuppetPhase.Deleted;
-                if (puppet.Phase is HumanPuppetPhase.Hidden or HumanPuppetPhase.DrawRequested)
-                    BeginRemoval(puppet, "unload");
-                if (puppet.Phase == HumanPuppetPhase.AwaitingDeletion)
+                OrResidue(puppet, "unload clean-up", () =>
                 {
-                    if (DeletionAllowed(puppet))
-                        DeleteObject(puppet);
-                    else
+                    if (puppet.Phase is HumanPuppetPhase.Hidden or HumanPuppetPhase.DrawRequested)
+                        BeginRemoval(puppet, "unload");
+                    if (puppet.Phase == HumanPuppetPhase.AwaitingDeletion)
                     {
-                        // Provisional: the unload-within-D2 decision stays the owner's.
-                        // The fail-safe here leaves the puppet hidden and alive; never a pass.
-                        puppet.Phase = HumanPuppetPhase.Residue;
-                        residue.Add(new(puppet.Handle, "a hidden puppet left alive", "unload within D2; deleting it would breach D2"));
-                        Latch(HumanPuppetStopRule.S6Residue, "unload", "a puppet was left alive inside D2");
+                        if (DeletionAllowed(puppet))
+                            DeleteObject(puppet);
+                        else
+                        {
+                            // Provisional: the unload-within-D2 decision stays the owner's.
+                            // The fail-safe here leaves the puppet hidden and alive; never a pass.
+                            puppet.Phase = HumanPuppetPhase.Residue;
+                            residue.Add(new(puppet.Handle, "a hidden puppet left alive", "unload within D2; deleting it would breach D2"));
+                            Latch(HumanPuppetStopRule.S6Residue, "unload", "a puppet was left alive inside D2");
+                        }
                     }
-                }
+                });
                 if (!deletedBefore && puppet.Phase == HumanPuppetPhase.Deleted)
                     deleted++;
             }
@@ -566,6 +681,11 @@ public sealed class HumanPuppetHost
         return new(deleted, residue.ToArray(), pending.Length, failures, order);
     }
 
+    /// <summary>Penumbra available, and Customize+ loaded, valid, at (6, 4) and with its parent IPC, as CP-3 requires.</summary>
+    private bool ProvidersAsChecked() =>
+        maps.PenumbraAvailable && maps.CustomizePlusLoaded && maps.CustomizePlusValid &&
+        maps.CustomizePlusApiVersion == (6, 4) && maps.CustomizePlusParentIpcPresent;
+
     private HumanPuppetRefusal SpawnRefusal()
     {
         if (Stop is not null)
@@ -573,9 +693,12 @@ public sealed class HumanPuppetHost
         lock (workGate)
             if (unloading)
                 return HumanPuppetRefusal.Unloading;
-        if (!backend.IsAvailable || !maps.PenumbraAvailable || !maps.CustomizePlusLoaded)
+        // H1-b, H1-d: every provider present and as CP-3 found it; Glamourer must answer its version.
+        if (!backend.IsAvailable || !ProvidersAsChecked() || glamourer.ApiVersion is null)
             return HumanPuppetRefusal.Unavailable;
-        if (!customizePlusChecked)
+        if (liveExit() is not null)
+            return HumanPuppetRefusal.SceneNotQuiet;
+        if (!customizePlusChecked || providerGeneration() != customizePlusCheckedGeneration)
             return HumanPuppetRefusal.CustomizePlusNotChecked;
         if (!world.IsUsable)
             return HumanPuppetRefusal.WorldUnverified;
@@ -627,6 +750,13 @@ public sealed class HumanPuppetHost
     {
         try
         {
+            if (!puppet.FactsBound)
+            {
+                // H1-d: before its first read, only the creation slot proves it.
+                if (backend.ComObjectByIndex(puppet.ComIndex) != puppet.Address || backend.ComIndexOf(puppet.Address) != puppet.ComIndex)
+                    return "its creation slot no longer holds it";
+                return puppet.Address == backend.LocalPlayer ? "it is the local player" : null;
+            }
             if (backend.ObjectTableEntry(puppet.GlobalIndex) != puppet.Address)
                 return "the object table no longer holds it at its index";
             if (backend.ComObjectByIndex(puppet.ComIndex) != puppet.Address)
@@ -667,14 +797,21 @@ public sealed class HumanPuppetHost
     {
         if (OwnershipMismatch(puppet) is { } ownership)
             return (HumanPuppetStopRule.Ownership, ownership);
-        if (!maps.PenumbraAvailable || !maps.CustomizePlusLoaded)
-            return (HumanPuppetStopRule.Provider, "a parent-map provider is not available");
+        if (liveExit() is { } exit)
+            return (HumanPuppetStopRule.LiveExit, exit);
+        if (providerGeneration() != puppet.ProviderGeneration)
+            return (HumanPuppetStopRule.Provider, "a provider was loaded, unloaded or reinitialized while the puppet was live");
+        if (!ProvidersAsChecked())
+            return (HumanPuppetStopRule.Provider, "a parent-map provider is not available or not as CP-3 found it");
         var reading = Read(puppet.GlobalIndex, phase);
         into.Add(reading);
         if (!reading.Resolved)
             return (HumanPuppetStopRule.S4ParentMapOrIsolation, "a parent map does not resolve the puppet to itself");
         if (IdentityMismatch(puppet) is { } identity)
             return (HumanPuppetStopRule.S5Identity, identity);
+        // H1-e: never targetable, in the re-verify, before the draw and on every update.
+        if (backend.ReadFacts(puppet.Address).Targetable)
+            return (HumanPuppetStopRule.Hiding, "the puppet is targetable");
         return null;
     }
 
@@ -723,21 +860,34 @@ public sealed class HumanPuppetHost
             return (HumanPuppetStopRule.Provider, "Penumbra did not report the puppet's collection");
         if (reading.IndividualSet)
             return (HumanPuppetStopRule.Collision, "an exact individual entry exists for the identity");
-        var expected = ExpectedCollection(facts, puppet.Kind);
+        if (!TryExpectedCollection(facts, puppet.Kind, out var expected))
+            return (HumanPuppetStopRule.Provider, "a collection type could not be read");
         if (expected is null)
-            return (HumanPuppetStopRule.Provider, "no expected collection could be read");
+            return (HumanPuppetStopRule.Provider, "no expected collection is set");
         return reading.EffectiveCollection == expected
             ? null
             : (HumanPuppetStopRule.S4ParentMapOrIsolation, "the effective collection is not the expected collection");
     }
 
-    /// <summary>P16 steps 2 and 4: the first set collection in the resolver's order, from the customize bytes.</summary>
-    private Guid? ExpectedCollection(HumanPuppetFacts facts, HumanPuppetKind puppetKind)
+    /// <summary>
+    /// P16 steps 2 and 4: the first set collection in the resolver's order,
+    /// from the customize bytes. False when any role in that order could not
+    /// be read (H1-d: a failed read is a stop, never "not set").
+    /// </summary>
+    private bool TryExpectedCollection(HumanPuppetFacts facts, HumanPuppetKind puppetKind, out Guid? expected)
     {
+        expected = null;
         foreach (var role in ExpectedCollectionOrder(facts.Customize!, puppetKind))
-            if (penumbra.GetCollection(role) is { } collection)
-                return collection;
-        return null;
+        {
+            if (!penumbra.TryGetCollection(role, out var collection))
+                return false;
+            if (collection is { } set)
+            {
+                expected = set;
+                return true;
+            }
+        }
+        return true;
     }
 
     /// <summary>
@@ -780,12 +930,58 @@ public sealed class HumanPuppetHost
         return stop;
     }
 
-    /// <summary>Begins P13 for every live puppet. Clean-up steps only latch, so this never re-enters.</summary>
+    /// <summary>
+    /// Begins P13 for every live puppet. Clean-up steps only latch, so this
+    /// never re-enters. A puppet whose clean-up throws is left as residue (H1-d).
+    /// </summary>
     private void CleanLive(string reason)
     {
         foreach (var puppet in puppets.Values.ToArray())
             if (puppet.Phase is HumanPuppetPhase.Hidden or HumanPuppetPhase.DrawRequested)
-                BeginRemoval(puppet, reason);
+                OrResidue(puppet, reason, () => BeginRemoval(puppet, reason));
+    }
+
+    /// <summary>Runs one clean-up step; if a port throws, the puppet is recorded as residue and left alone.</summary>
+    private void OrResidue(Puppet puppet, string step, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception exception)
+        {
+            puppet.Phase = HumanPuppetPhase.Residue;
+            residue.Add(new(puppet.Handle, "a puppet whose clean-up did not finish", $"{step}: a port call threw ({exception.GetType().Name})"));
+            Latch(HumanPuppetStopRule.S6Residue, step, "a port call threw during clean-up");
+        }
+    }
+
+    /// <summary>
+    /// H1-d: a port call that threw inside a host call. The stop latches as
+    /// Provider, then every live puppet begins P13 (not while unloading: the
+    /// unload's own clean-up does that after the drain).
+    /// </summary>
+    private HumanPuppetStopRecord Fault(string step, Exception exception)
+    {
+        var stop = Latch(HumanPuppetStopRule.Provider, step, $"a port call threw ({exception.GetType().Name})");
+        bool cleanUpAllowed;
+        lock (workGate)
+            cleanUpAllowed = !unloading;
+        if (cleanUpAllowed)
+            CleanLive("fault");
+        return stop;
+    }
+
+    private HumanPuppetOutcome Guarded(string step, Func<HumanPuppetOutcome> call)
+    {
+        try
+        {
+            return call();
+        }
+        catch (Exception exception)
+        {
+            return HumanPuppetOutcome.Stopped(Fault(step, exception));
+        }
     }
 
     private HumanPuppetStopRecord Latch(HumanPuppetStopRule rule, string step, string detail)
@@ -802,6 +998,9 @@ public sealed class HumanPuppetHost
             Forget(puppet, $"{reason}: {mismatch}");
             return false;
         }
+        // An object whose first read threw was never drawn, and its index is unknown: no write.
+        if (!puppet.FactsBound)
+            return true;
         backend.SetAlpha(puppet.Address, 0f);
         backend.DisableDraw(puppet.Address);
         return true;
@@ -833,6 +1032,17 @@ public sealed class HumanPuppetHost
 
     private void BeginRemoval(Puppet puppet, string reason)
     {
+        if (!puppet.FactsBound)
+        {
+            // H1-d: its first read threw, so no copy ran and no map names its
+            // slot. Its global index is unknown, so it gets no write (it may be
+            // outside 200–439 and was never drawn); proved by its creation
+            // slot only, it is deleted.
+            puppet.Phase = HumanPuppetPhase.AwaitingDeletion;
+            DeleteObject(puppet);
+            return;
+        }
+
         // 1–2. Hide, guarded by checks 1–5; then the identity (P5-6, P5-7).
         if (!HideIfOwned(puppet, reason))
             return;
@@ -930,13 +1140,15 @@ public sealed class HumanPuppetHost
         puppet.DeletedUpdate = update;
     }
 
-    private sealed class Puppet(HumanPuppetHandle handle, string name, ushort world, uint key, HumanPuppetKind kind)
+    private sealed class Puppet(HumanPuppetHandle handle, string name, ushort world, uint key, HumanPuppetKind kind, long providerGeneration)
     {
         public HumanPuppetHandle Handle { get; } = handle;
         public string Name { get; } = name;
         public ushort World { get; } = world;
         public uint Key { get; } = key;
         public HumanPuppetKind Kind { get; } = kind;
+        public long ProviderGeneration { get; } = providerGeneration;
+        public bool FactsBound { get; private set; }
         public nint Address { get; private set; }
         public int ComIndex { get; private set; }
         public int GlobalIndex { get; private set; }
@@ -952,13 +1164,18 @@ public sealed class HumanPuppetHost
         public long? DeletedUpdate { get; set; }
         public bool SlotCheckedAfterDeletion { get; set; }
 
-        public void Bind(nint address, int comIndex, HumanPuppetFacts facts)
+        public void BindCreation(nint address, int comIndex)
         {
             Address = address;
             ComIndex = comIndex;
+        }
+
+        public void BindFacts(HumanPuppetFacts facts)
+        {
             GlobalIndex = facts.GlobalIndex;
             GameObjectId = facts.GameObjectId;
             EntityId = facts.EntityId;
+            FactsBound = true;
         }
 
         public HumanPuppetSnapshot Snapshot() => new(Handle, Phase, GlobalIndex, Kind, Assigned, LatestChangeUpdate,

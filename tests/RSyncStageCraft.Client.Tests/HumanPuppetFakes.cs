@@ -61,11 +61,18 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
     public Guid? EffectiveOverride { get; set; }
     public Action? OnScan { get; set; }
 
+    // T3-1 amendments (H1).
+    public bool HidingLeavesTargetable { get; set; }
+
+    /// <summary>H1-d: throws from the named port call ("read", "copy", "penumbra get", "collection") when true.</summary>
+    public Func<string, bool>? ThrowWhen { get; set; }
+
     // IHumanParentMapPort.
     public bool PenumbraAvailable { get; set; } = true;
     public bool CustomizePlusLoaded { get; set; } = true;
     public (int Major, int Minor)? CustomizePlusApiVersion { get; set; } = (6, 4);
     public bool CustomizePlusParentIpcPresent { get; set; } = true;
+    public bool CustomizePlusValid { get; set; } = true;
 
     // IHumanGlamourerReadPort.
     public (int Major, int Minor)? ApiVersion { get; set; } = (1, 7);
@@ -93,6 +100,10 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
         public byte[]? Customize;
         public float Alpha = 1f;
         public bool DrawEnabled;
+
+        // A fresh object is targetable until H1-a hides it.
+        public bool Targetable = true;
+        public bool NameplateHidden;
     }
 
     public Obj Add(int globalIndex, int comIndex, int kind)
@@ -157,19 +168,40 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
 
     public nint ComObjectByIndex(int comIndex) => ActorSlotRange.IsComIndex(comIndex) ? com[comIndex] : 0;
 
-    public int ComIndexOf(nint address) => Array.IndexOf(com, address);
+    public int ComIndexOf(nint address)
+    {
+        Throw("com index");
+        return Array.IndexOf(com, address);
+    }
 
     public nint ObjectTableEntry(int globalIndex) => table.TryGetValue(globalIndex, out var obj) ? obj.Address : 0;
 
     public HumanPuppetFacts ReadFacts(nint address)
     {
+        Throw("read");
         var obj = byAddress[address];
         return new(obj.GlobalIndex, obj.GameObjectId, obj.EntityId, obj.Kind, obj.Name, obj.Terminated, obj.World, obj.NameId,
-            obj.Owner, obj.HasHumanModel, obj.Customize?.ToArray());
+            obj.Owner, obj.HasHumanModel, obj.Customize?.ToArray(), obj.Targetable);
+    }
+
+    private void Throw(string call)
+    {
+        if (ThrowWhen?.Invoke(call) == true)
+            throw new InvalidOperationException("synthetic port fault: " + call);
+    }
+
+    public void PrepareHidden(nint puppet)
+    {
+        var obj = byAddress[puppet];
+        Calls.Add($"hide prepare {obj.GlobalIndex}");
+        if (!HidingLeavesTargetable)
+            obj.Targetable = false;
+        obj.NameplateHidden = true;
     }
 
     public void CopyCharacter(nint puppet, nint source)
     {
+        Throw("copy");
         var target = byAddress[puppet];
         var from = byAddress[source];
         Calls.Add($"copy {from.GlobalIndex}->{target.GlobalIndex}");
@@ -261,7 +293,11 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
         return true;
     }
 
-    public int? GetPenumbraParent(int globalIndex) => PenumbraAvailable ? penumbraMap[globalIndex] : null;
+    public int? GetPenumbraParent(int globalIndex)
+    {
+        Throw("penumbra get");
+        return PenumbraAvailable ? penumbraMap[globalIndex] : null;
+    }
 
     public bool SetCustomizePlusParent(int globalIndex, int parent)
     {
@@ -283,10 +319,19 @@ internal sealed class FakeHumanScene : IHumanPuppetBackend, IHumanParentMapPort,
         return new(true, IndividualSet, effective);
     }
 
-    public Guid? GetCollection(HumanCollectionRole role)
+    /// <summary>Roles whose read fails (H1-d: a stop, never "not set").</summary>
+    public HashSet<HumanCollectionRoleKind> UnreadableRoles { get; } = [];
+
+    public bool TryGetCollection(HumanCollectionRole role, out Guid? collection)
     {
+        Throw("collection");
         Calls.Add($"collection {role.Kind}");
-        return Roles.TryGetValue(role.Kind, out var collection) ? collection : null;
+        collection = null;
+        if (UnreadableRoles.Contains(role.Kind))
+            return false;
+        if (Roles.TryGetValue(role.Kind, out var set))
+            collection = set;
+        return true;
     }
 
     public Guid? CreateTemporaryCollection(string name)

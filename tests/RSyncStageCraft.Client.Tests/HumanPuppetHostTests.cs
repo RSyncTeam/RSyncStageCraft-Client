@@ -19,7 +19,7 @@ public sealed class HumanPuppetHostTests
     private readonly FakeHumanScene scene = new();
 
     private HumanPuppetHost Host(int limit = 1, HumanPuppetKind kind = HumanPuppetKind.BattleNpc, HumanPuppetWorld? world = null, int others = 0) =>
-        new(scene, scene, scene, scene, world ?? World, kind, () => others, limit);
+        new(scene, scene, scene, scene, world ?? World, kind, () => others, () => 0, () => null, limit);
 
     private HumanPuppetHost Ready(int limit = 1, HumanPuppetKind kind = HumanPuppetKind.BattleNpc, int others = 0)
     {

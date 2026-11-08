@@ -11,10 +11,14 @@ namespace RSyncStageCraft.Tests;
 /// <summary>
 /// The plugin holds no user-reachable development tooling in any build: no
 /// Debug Tools window type, no self-test controller instance or registration,
-/// no spike UI, no button and no invocation path, even when Dalamud loads it as
-/// a dev plugin. A Debug build (RSC_DEVELOPMENT) loaded as a dev plugin
-/// differs from a Release build only in the development diagnostics the actor
-/// host logs and in capturing skeleton groups for preview (never uploaded).
+/// no spike UI and no button, even when Dalamud loads it as a dev plugin. A
+/// Debug build (RSC_DEVELOPMENT) loaded as a dev plugin differs from a Release
+/// build only in the development diagnostics the actor host logs, in capturing
+/// skeleton groups for preview (never uploaded), and in T3-1's one invocation
+/// path (R-1): a command used only from the Dalamud log window's console, which
+/// composes the human puppet host through its runner and nothing else (R-1b).
+/// A Release build has none of that runner, its command, its adapters or its
+/// IPC labels (checked as positive absence below).
 ///
 /// Every test runs in both CI jobs, so absence is checked in both builds.
 /// </summary>
@@ -27,6 +31,7 @@ public sealed class ReleaseDebugSeparationTests
 #endif
 
     private static readonly PluginMetadata Plugin = new(typeof(DevelopmentBuild).Assembly.Location);
+    private static readonly PluginMetadata Client = new(typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly.Location);
 
     [Fact]
     public void TheTestsAndThePluginWereBuiltInTheSameConfiguration()
@@ -169,14 +174,116 @@ public sealed class ReleaseDebugSeparationTests
         Assert.Equal(Debug, client.GetTypes().Any(type => type.FullName!.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal)));
     }
 
+    private const string HumanPuppetHostType = HumanPuppetNamespace + "HumanPuppetHost";
+    private const string T3SequenceType = HumanPuppetNamespace + "HumanPuppetT3Sequence";
+    private const string T3RunType = "RSyncStageCraft.HumanPuppetT3Run";
+
+    /// <summary>T3-1's plugin types (A1–A5): Debug only.</summary>
+    private static readonly string[] T3PluginTypes =
+    [
+        T3RunType,
+        "RSyncStageCraft.Adapters.HumanPuppetNativeBackend",
+        "RSyncStageCraft.Adapters.HumanParentMapIpc",
+        "RSyncStageCraft.Adapters.HumanPenumbraReadIpc",
+        "RSyncStageCraft.Adapters.HumanGlamourerReadIpc",
+        "RSyncStageCraft.Adapters.HumanPuppetT3Probe",
+    ];
+
     [Fact]
-    public void NothingInThePluginComposesTheHumanPuppetHost()
+    public void OnlyTheT3RunnerComposesTheHumanPuppetHost()
     {
-        // Composition is not part of this candidate: no plugin method names,
-        // constructs, calls or implements any human puppet type, in either
-        // build, so no build can reach it.
-        Assert.Empty(Plugin.ReferenceCallers(target => target.Type.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal)));
-        Assert.DoesNotContain(Plugin.ReferencedTypeNames, name => name.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal));
+        if (!DebugBuild())
+        {
+            // Release: no plugin method names, constructs, calls or implements any human puppet type.
+            Assert.Empty(Plugin.ReferenceCallers(target => target.Type.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal)));
+            Assert.DoesNotContain(Plugin.ReferencedTypeNames, name => name.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal));
+            return;
+        }
+        // R-1b, Debug: the plugin never constructs the host itself. In the
+        // Client only the T3-1 sequence constructs it; in the plugin only the
+        // runner constructs the sequence and the adapters; and only the
+        // connection's constructor constructs the runner. That the site is
+        // inside DevelopmentBuild.ToolsEnabled is not proved here (IL cannot
+        // prove a runtime branch, and the constructor calls ToolsEnabled for
+        // other tools too): the #if around the site and the branch are the guards.
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Type == HumanPuppetHostType && target.Name == ".ctor"));
+        Assert.Equal(new[] { new MethodName(T3SequenceType, ".ctor") },
+            Client.Callers(target => target.Type == HumanPuppetHostType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(T3RunType, ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == T3SequenceType && target.Name == ".ctor").ToArray());
+        foreach (var adapter in T3PluginTypes.Skip(1))
+            Assert.Equal(new[] { new MethodName(T3RunType, ".ctor") },
+                Plugin.Callers(target => target.Type == adapter && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
+            Plugin.Callers(target => target.Type == T3RunType && target.Name == ".ctor").ToArray());
+    }
+
+    [Fact]
+    public void NothingCallsTheHumanPuppetAssignment()
+    {
+        // F1's assignment path stays unreachable in both builds: no Client or
+        // plugin method calls it, so A3's throwing write members are never reached.
+        Assert.Empty(Client.Callers(target => target.Type == HumanPuppetHostType && target.Name == "AssignTemporaryCollection"));
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Type == HumanPuppetHostType && target.Name == "AssignTemporaryCollection"));
+    }
+
+    [Theory]
+    [InlineData("CreateTemporaryCollection")]
+    [InlineData("AssignTemporaryCollection")]
+    [InlineData("DeleteTemporaryCollection")]
+    [InlineData("AddTemporaryMod")]
+    [InlineData("RemoveTemporaryMod")]
+    [InlineData("SetCollectionForObject")]
+    [InlineData("SetCollection")]
+    [InlineData("RedrawObject")]
+    [InlineData("RedrawAll")]
+    public void NoBuildReferencesAPenumbraWrite(string subscriber)
+    {
+        // Both builds: no temporary collection or mod, no collection write and
+        // no redraw: no such Penumbra.Api subscriber (or one whose name starts
+        // with it), no call to one, and no such IPC label.
+        Assert.DoesNotContain(Plugin.ReferencedTypeNames, name =>
+            name.StartsWith("Penumbra.Api.IpcSubscribers." + subscriber, StringComparison.Ordinal));
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Type.StartsWith("Penumbra.", StringComparison.Ordinal) &&
+            (target.Type.StartsWith("Penumbra.Api.IpcSubscribers." + subscriber, StringComparison.Ordinal) ||
+             target.Name.StartsWith(subscriber, StringComparison.Ordinal))));
+        Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith("Penumbra." + subscriber, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void EveryPenumbraSubscriberReferencedIsOnTheReadAllowlist()
+    {
+        // An allowlist, not only a denylist: any Penumbra.Api subscriber not
+        // named here (a write, a redraw, a mod or settings change) fails.
+        const string prefix = "Penumbra.Api.IpcSubscribers.";
+        var allowed = new HashSet<string>(StringComparer.Ordinal) { "ApiVersion", "GetGameObjectResourcePaths", "GetModDirectory" };
+        if (DebugBuild())
+            allowed.UnionWith(new[] { "GetCollection", "GetCollectionForObject", "GetCollections", "GetCutsceneParentIndex", "SetCutsceneParentIndex",
+                "Initialized", "Disposed" });
+        var referenced = Plugin.ReferencedTypeNames.Where(name => name.StartsWith(prefix, StringComparison.Ordinal))
+            .Select(name => name[prefix.Length..]).ToArray();
+        Assert.NotEmpty(referenced);
+        Assert.DoesNotContain(referenced, name => !allowed.Contains(name));
+    }
+
+    // A branch on the constant itself is unreachable code (CS0162) in one build.
+    private static bool DebugBuild() => Debug;
+
+    [Fact]
+    public void TheT3RunnerItsCommandAndItsIpcExistOnlyInDebug()
+    {
+        // Positive absence in Release (and presence in Debug, so the check is not vacuous).
+        foreach (var type in T3PluginTypes)
+            Assert.Equal(Debug, Plugin.HasType(type));
+        Assert.Equal(Debug, Plugin.TypeNames.Any(name => name.Contains("HumanPuppet", StringComparison.Ordinal)));
+        Assert.Equal(Debug, Plugin.ReferencedTypeNames.Any(name => name.StartsWith(HumanPuppetNamespace, StringComparison.Ordinal)));
+        foreach (var subscriber in new[] { "SetCutsceneParentIndex", "GetCutsceneParentIndex", "GetCollection", "GetCollectionForObject", "GetCollections" })
+            Assert.Equal(Debug, Plugin.ReferencedTypeNames.Contains("Penumbra.Api.IpcSubscribers." + subscriber));
+        Assert.Equal(Debug, Plugin.ReferencedTypeNames.Contains("Glamourer.Api.IpcSubscribers.CanUnlock"));
+        Assert.Equal(Debug, Plugin.UserStrings.Any(value => value.StartsWith("CustomizePlus.", StringComparison.Ordinal)));
+        Assert.Equal(Debug, Plugin.UserStrings.Contains("/rsct31"));
+        Assert.Equal(Debug, Plugin.ReferencedTypeNames.Contains("Dalamud.Plugin.Services.ICommandManager"));
+        Assert.Equal(Debug, Plugin.ReferencedTypeNames.Contains("Dalamud.Game.Command.CommandInfo"));
     }
 
     [Theory]
