@@ -421,6 +421,18 @@ public sealed class HumanPuppetT3Tests
         public bool HomeWorldThrows { get; set; }
 
         public ushort? PlayerHomeWorld() => HomeWorldThrows ? throw new InvalidOperationException("synthetic probe fault") : scene.Player.World;
+
+        public List<KeyValuePair<string, string>> Observations { get; } = [];
+
+        public bool ObservationsThrow { get; set; }
+
+        public List<int> ObservationReads { get; } = [];
+
+        public IReadOnlyList<KeyValuePair<string, string>> ReadPuppetObservations(int globalIndex)
+        {
+            ObservationReads.Add(globalIndex);
+            return ObservationsThrow ? throw new InvalidOperationException("synthetic observation fault") : Observations.ToArray();
+        }
     }
 
     private (HumanPuppetT3Sequence Sequence, List<string> Log, FakeProbe Probe) Sequence(HumanPuppetWorldRow? row = null, SceneLocation? place = null)
@@ -633,6 +645,100 @@ public sealed class HumanPuppetT3Tests
         // The host ticked first, so this update's F2 check still ran.
         Assert.Contains(sequence.Host.Readings, reading => reading.Phase == "F2 tick" && reading.Update == tick);
         Assert.Null(sequence.Host.Stop);
+    }
+    // ---- T3-1M (P1-M): the puppet's observations after the draw ----
+
+    private const string Summary = "file 0123456789abcdef, bones 60, names 1111111111111111, parents 2222222222222222, reference pose 3333333333333333";
+
+    private static void AddSkeleton(Dictionary<string, string> facts, string who, string summary)
+    {
+        facts[$"{who} skeleton partials"] = "1";
+        facts[$"{who} skeleton 0"] = summary;
+    }
+
+    [Fact]
+    public void TheDrawnPuppetsObservationsAreLoggedOnceAfterIsolationHeldWithTheirProvenance()
+    {
+        var (sequence, log, probe) = Sequence();
+        AddSkeleton(probe.Facts, "player", Summary);
+        probe.Observations.Add(new("puppet skeleton partials", "1"));
+        probe.Observations.Add(new("puppet skeleton 0", Summary.Replace("names 1111111111111111", "names 4444444444444444", StringComparison.Ordinal)));
+        probe.Observations.AddRange(HumanPuppetT3Observations.DescribeSkeletonResources("puppet", new Dictionary<string, HashSet<string>>
+        {
+            [@"D:\SyntheticMods\ModA\skl_c0101b0001.sklb"] = ["chara/human/c0101/skeleton/base/b0001/skl_c0101b0001.sklb"],
+            [@"D:\SyntheticMods\ModA\human.pbd"] = ["chara/xls/boneDeformer/human.pbd"],
+        }));
+        probe.Observations.AddRange(HumanPuppetT3Observations.DescribeSkeletonResources("player", new Dictionary<string, HashSet<string>>
+        {
+            [@"D:\SyntheticMods\ModA\skl_c0101b0001.sklb"] = ["chara/human/c0101/skeleton/base/b0001/skl_c0101b0001.sklb"],
+            ["chara/xls/boneDeformer/human.pbd"] = ["chara/xls/boneDeformer/human.pbd"],
+        }));
+        foreach (var step in new[] { "cp3", "baseline", "spawn", "draw", "isolation" })
+            Run(sequence, step);
+        Assert.Equal(5, sequence.NextStep);
+        Assert.Equal(new[] { 200 }, probe.ObservationReads);
+        var held = log.FindIndex(line => line.Contains("isolation held", StringComparison.Ordinal));
+        var provenance = log.FindIndex(line => line.Contains("Penumbra's per-object resource report", StringComparison.Ordinal));
+        Assert.True(held >= 0 && provenance > held);
+        Assert.Contains("does not show which deformer the puppet loaded", log[provenance], StringComparison.Ordinal);
+        Assert.Contains("does not name the collection", log[provenance], StringComparison.Ordinal);
+        Assert.Contains(log, line => line.EndsWith("isolation puppet skeleton partials: 1", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("isolation skeleton compared with the player: partials 1 and 1; partial 0 differs in names.", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("isolation puppet skeleton resource deformer: redirected, actual ", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("isolation player skeleton resource deformer: vanilla, actual ", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains(
+            "isolation skeleton resources compared with the player: same 1, different 1, puppet only 0, player only 0; different: deformer.", StringComparison.Ordinal));
+        // No file-system path reaches the log, only hashed path strings.
+        Assert.DoesNotContain(log, line => line.Contains("SyntheticMods", StringComparison.Ordinal) || line.Contains(@"D:\", StringComparison.Ordinal));
+        // The observations are not run facts: the baseline comparison is unchanged.
+        Assert.Contains(log, line => line.Contains("isolation: every run fact equals the baseline", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnObservationReadThatThrowsIsLoggedAndNeverGatesTheStep()
+    {
+        var (sequence, log, probe) = Sequence();
+        probe.ObservationsThrow = true;
+        foreach (var step in new[] { "cp3", "baseline", "spawn", "draw", "isolation" })
+            Run(sequence, step);
+        Assert.Equal(5, sequence.NextStep);
+        Assert.Null(sequence.Host.Stop);
+        Assert.Contains(log, line => line.Contains("puppet observations unreadable (InvalidOperationException).", StringComparison.Ordinal));
+        Assert.DoesNotContain(log, line => line.Contains("Penumbra's per-object resource report", StringComparison.Ordinal));
+        foreach (var step in new[] { "remove", "report" })
+            Run(sequence, step);
+        Assert.Equal(7, sequence.NextStep);
+    }
+
+    [Fact]
+    public void ThePuppetIsNotObservedWhenItsDrawWasNotObserved()
+    {
+        scene.DrawAppears = false;
+        var (sequence, log, probe) = Sequence();
+        foreach (var step in new[] { "cp3", "baseline", "spawn", "draw", "isolation" })
+            Run(sequence, step);
+        Assert.Contains(log, line => line.Contains("isolation held", StringComparison.Ordinal));
+        Assert.Empty(probe.ObservationReads);
+        Assert.Contains(log, line => line.Contains("puppet observations not read: the draw was not observed.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheIsolationStepMakesNoSceneWriteWhenTheObservationsAreRead()
+    {
+        var (withObservations, _, probe) = Sequence();
+        foreach (var step in new[] { "cp3", "baseline", "spawn", "draw" })
+            Run(withObservations, step);
+        var before = scene.Calls.Count;
+        Run(withObservations, "isolation");
+        var isolationCalls = scene.Calls.Skip(before).ToList();
+        Assert.Single(probe.ObservationReads);
+        // The scene sees only the host's own isolation reads: no write, draw, assignment or deletion.
+        // (The fake probe does not touch the scene; the real probe's only IPC is the allowlisted
+        // GetGameObjectResourcePaths, held by ReleaseDebugSeparationTests.)
+        Assert.DoesNotContain(isolationCalls, call => call.Contains("set", StringComparison.Ordinal) || call.Contains("assign", StringComparison.Ordinal) ||
+            call.StartsWith("draw", StringComparison.Ordinal) || call.StartsWith("delete", StringComparison.Ordinal) ||
+            call.StartsWith("alpha", StringComparison.Ordinal) || call.StartsWith("write", StringComparison.Ordinal) ||
+            call.StartsWith("hide", StringComparison.Ordinal));
     }
 }
 #endif
