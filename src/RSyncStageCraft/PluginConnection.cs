@@ -41,6 +41,8 @@ internal sealed class PluginConnection
 #if RSC_DEVELOPMENT
     // T3-1 only: null unless a Debug build is loaded as a dev plugin.
     private readonly HumanPuppetT3Run? t31;
+    // HV-1 only: null unless a Debug build is loaded as a dev plugin.
+    private readonly HumanActorBaselineRun? hv1;
 #endif
 
     internal PluginConnection(
@@ -203,7 +205,8 @@ internal sealed class PluginConnection
             try
             {
                 t31 = new HumanPuppetT3Run(pluginInterface, commands, framework, clientState, condition, data,
-                    () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene),
+                    () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
+                        (hv1?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
                         or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
                     () => scenes.Current,
@@ -213,6 +216,21 @@ internal sealed class PluginConnection
             {
                 t31 = null;
                 log($"RSC T3-1 runner not loaded ({exception.GetType().Name}).");
+            }
+            // HV-1: one visible client-only human, refused while any other RSC actor or T3-1 puppet exists.
+            try
+            {
+                hv1 = new HumanActorBaselineRun(commands, framework, clientState, condition,
+                    () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
+                        (t31?.OccupiedSlots ?? 0),
+                    () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
+                        or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
+                    log);
+            }
+            catch (Exception exception)
+            {
+                hv1 = null;
+                log($"RSC HV-1 runner not loaded ({exception.GetType().Name}).");
             }
         }
 #endif
@@ -336,6 +354,7 @@ internal sealed class PluginConnection
 #if RSC_DEVELOPMENT
         // T3-1 (S2): its command first, then its puppet, before the framework update and the actor host stop.
         t31?.Shutdown();
+        hv1?.Shutdown();
 #endif
         location.Changed -= OnLocationChanged;
         framework.Update -= OnFrameworkUpdate;
@@ -420,6 +439,14 @@ internal sealed class PluginConnection
         catch (Exception exception)
         {
             log($"RSC T3-1 tick error ({exception.GetType().Name}).");
+        }
+        try
+        {
+            hv1?.Tick();
+        }
+        catch (Exception exception)
+        {
+            log($"RSC HV-1 tick error ({exception.GetType().Name}).");
         }
 #endif
     }

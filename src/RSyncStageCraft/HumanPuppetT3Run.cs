@@ -124,6 +124,9 @@ internal sealed class HumanPuppetT3Run
             : "RSC T3-1 runner loaded without its command; no step can run.");
     }
 
+    /// <summary>Puppets not yet deleted; read by the HV-1 runner's scene check.</summary>
+    internal int OccupiedSlots => sequence.Host.OccupiedSlots;
+
     /// <summary>Game thread, every framework update.</summary>
     internal void Tick()
     {
