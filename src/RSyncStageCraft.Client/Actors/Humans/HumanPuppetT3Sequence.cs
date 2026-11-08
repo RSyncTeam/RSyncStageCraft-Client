@@ -17,6 +17,15 @@ public interface IHumanT3Probe
 
     /// <summary>The player's home world, or null when it cannot be read.</summary>
     ushort? PlayerHomeWorld();
+
+    /// <summary>
+    /// T3-1M (P1-M), read without writing, once after isolation held on a
+    /// drawn puppet: the puppet's own skeleton summary (<c>"puppet skeleton …"</c>)
+    /// and the skeleton-resource lines of Penumbra's per-object resource report
+    /// for the puppet and the player (<see cref="HumanPuppetT3Observations.DescribeSkeletonResources"/>).
+    /// Hashed path strings only; no resource file is read.
+    /// </summary>
+    IReadOnlyList<KeyValuePair<string, string>> ReadPuppetObservations(int globalIndex);
 }
 
 /// <summary>
@@ -280,8 +289,42 @@ public sealed class HumanPuppetT3Sequence
     {
         var outcome = Host.VerifyIsolation(handle!.Value);
         log(Prefix + (outcome.Done ? "isolation held (P6(a), P16)." : "isolation did not hold: " + Describe(outcome)));
-        LogFactDifferences("isolation", probe.ReadRunFacts());
+        var facts = probe.ReadRunFacts();
+        LogFactDifferences("isolation", facts);
+        if (outcome.Done)
+            LogPuppetObservations(facts);
         return outcome.Done;
+    }
+
+    /// <summary>
+    /// T3-1M (P1-M): the puppet's observations after the draw, logged only.
+    /// They never gate the step, stop the run or change a write; a failed read
+    /// is logged as unreadable.
+    /// </summary>
+    private void LogPuppetObservations(IReadOnlyList<KeyValuePair<string, string>> facts)
+    {
+        if (Host.Snapshot().SingleOrDefault(item => item.Handle == handle!.Value)?.DrawObservedUpdate is null)
+        {
+            log(Prefix + "puppet observations not read: the draw was not observed.");
+            return;
+        }
+        var lines = new List<string>();
+        try
+        {
+            var observations = probe.ReadPuppetObservations(puppetSlot);
+            lines.Add(HumanPuppetT3Observations.Provenance);
+            foreach (var observation in observations)
+                lines.Add($"isolation {observation.Key}: {observation.Value}");
+            lines.Add("isolation " + HumanPuppetT3Observations.CompareSkeletons(observations, facts));
+            lines.Add("isolation " + HumanPuppetT3Observations.CompareSkeletonResources(observations));
+        }
+        catch (Exception exception)
+        {
+            log(Prefix + $"puppet observations unreadable ({exception.GetType().Name}).");
+            return;
+        }
+        foreach (var line in lines)
+            log(Prefix + line);
     }
 
     private bool RunRemove()

@@ -632,6 +632,9 @@ internal sealed class HumanGlamourerReadIpc : IHumanGlamourerReadPort
 /// a hash prefix. Penumbra's collection list and the resource paths of every
 /// object in the table that is not the puppet; Customize+'s profile list and
 /// the player's active profile; the player's skeleton summary and kind.
+/// T3-1M (P1-M) adds one read after isolation: the puppet's own skeleton
+/// summary and the skeleton-resource entries of the puppet's and the player's
+/// per-object resource reports, as hashed path strings.
 /// </summary>
 internal sealed class HumanPuppetT3Probe : IHumanT3Probe
 {
@@ -695,6 +698,43 @@ internal sealed class HumanPuppetT3Probe : IHumanT3Probe
             return $"code {code}, profile {(profile is { } id ? HumanPuppetNativeBackend.Hash(Encoding.UTF8.GetBytes(id.ToString("N"))) : "none")}";
         })));
         return facts;
+    }
+
+    /// <summary>
+    /// T3-1M (P1-M): the puppet's own skeleton summary, then Penumbra's
+    /// per-object resource report for the puppet and the player in one call,
+    /// shaped by <see cref="HumanPuppetT3Observations.DescribeSkeletonResources"/>:
+    /// skeleton-resource entries only, hashed path strings only. No resource
+    /// file is opened, read or hashed, and nothing is written.
+    /// </summary>
+    public IReadOnlyList<KeyValuePair<string, string>> ReadPuppetObservations(int globalIndex)
+    {
+        var lines = new List<KeyValuePair<string, string>>();
+        if (globalIndex <= 0 || globalIndex >= Math.Min(backend.ObjectTableLength, ushort.MaxValue))
+        {
+            lines.Add(new("puppet skeleton", "unreadable (index)"));
+            return lines;
+        }
+        lines.AddRange(HumanPuppetNativeBackend.SkeletonSummary(backend.ObjectTableEntry(globalIndex), "puppet"));
+        Dictionary<string, HashSet<string>>?[]? paths = null;
+        string? failure = null;
+        try
+        {
+            paths = resourcePaths.Invoke([(ushort)globalIndex, 0]);
+        }
+        catch (Exception exception)
+        {
+            failure = $"unanswered ({exception.GetType().Name})";
+        }
+        if (paths is null || paths.Length != 2)
+        {
+            lines.Add(new("puppet skeleton resources", failure ?? "unanswered"));
+            lines.Add(new("player skeleton resources", failure ?? "unanswered"));
+            return lines;
+        }
+        lines.AddRange(HumanPuppetT3Observations.DescribeSkeletonResources("puppet", paths[0]));
+        lines.AddRange(HumanPuppetT3Observations.DescribeSkeletonResources("player", paths[1]));
+        return lines;
     }
 
     /// <summary>R-5: every occupied object-table index except the puppet's, as one count and one hash per index.</summary>
