@@ -262,9 +262,30 @@ public sealed class ReleaseDebugSeparationTests
     [InlineData("RedrawAll")]
     public void NoBuildReferencesAPenumbraWrite(string subscriber)
     {
-        // Both builds: no temporary collection or mod, no collection write and
-        // no redraw: no such Penumbra.Api subscriber (or one whose name starts
-        // with it), no call to one, and no such IPC label.
+        if (DebugBuild() && Hv2PenumbraWrites.Contains(subscriber))
+        {
+            // Debug, HV-2 only: exactly this subscriber (not one whose name
+            // merely starts with it, such as a mod for every collection),
+            // called only by HV-2's adapter.
+            Assert.Equal(new[] { "Penumbra.Api.IpcSubscribers." + subscriber }, Plugin.ReferencedTypeNames
+                .Where(name => name.StartsWith("Penumbra.Api.IpcSubscribers." + subscriber, StringComparison.Ordinal)).ToArray());
+            var callers = Plugin.ReferenceCallers(target => target.Type.StartsWith("Penumbra.Api.IpcSubscribers." + subscriber, StringComparison.Ordinal))
+                .ToArray();
+            Assert.NotEmpty(callers);
+            Assert.All(callers, caller => Assert.True(InHv2Adapter(caller), caller.ToString()));
+            // The same name-based check as Release: any Penumbra member named
+            // like the write, on any type, is called from the adapter only.
+            var named = Plugin.ReferenceCallers(target => target.Type.StartsWith("Penumbra.", StringComparison.Ordinal) &&
+                target.Name.StartsWith(subscriber, StringComparison.Ordinal)).ToArray();
+            Assert.DoesNotContain(named, caller => !InHv2Adapter(caller));
+            Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith("Penumbra." + subscriber, StringComparison.Ordinal));
+            return;
+        }
+        // Both builds (Release for HV-2's own calls too; the redraws in Debug
+        // as well, since HV-2 redraws through the game, not Penumbra): no
+        // temporary collection or mod, no collection write and no redraw: no such
+        // Penumbra.Api subscriber (or one whose name starts with it), no call
+        // to one, and no such IPC label.
         Assert.DoesNotContain(Plugin.ReferencedTypeNames, name =>
             name.StartsWith("Penumbra.Api.IpcSubscribers." + subscriber, StringComparison.Ordinal));
         Assert.Empty(Plugin.ReferenceCallers(target => target.Type.StartsWith("Penumbra.", StringComparison.Ordinal) &&
@@ -281,8 +302,13 @@ public sealed class ReleaseDebugSeparationTests
         const string prefix = "Penumbra.Api.IpcSubscribers.";
         var allowed = new HashSet<string>(StringComparer.Ordinal) { "ApiVersion", "GetGameObjectResourcePaths", "GetModDirectory" };
         if (DebugBuild())
+        {
             allowed.UnionWith(new[] { "GetCollection", "GetCollectionForObject", "GetCollections", "GetCutsceneParentIndex", "SetCutsceneParentIndex",
                 "Initialized", "Disposed" });
+            // HV-2's read, and its writes (kept to its adapter by NoBuildReferencesAPenumbraWrite).
+            allowed.Add("GetMetaManipulations");
+            allowed.UnionWith(Hv2PenumbraWrites);
+        }
         var referenced = Plugin.ReferencedTypeNames.Where(name => name.StartsWith(prefix, StringComparison.Ordinal))
             .Select(name => name[prefix.Length..]).ToArray();
         Assert.NotEmpty(referenced);
@@ -329,10 +355,59 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv1RunType && target.Name == ".ctor").ToArray());
-        Assert.Equal(new[] { new MethodName(Hv1RunType, ".ctor") },
-            Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor").ToArray());
-        Assert.Equal(new[] { new MethodName(Hv1RunType, ".ctor") },
-            Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor").ToArray());
+        // HV-2 composes the same native adapter and baseline in its own runner.
+        Assert.Equal(new[] { Hv1RunType, Hv2RunType },
+            Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor").Select(caller => caller.Type).Order(StringComparer.Ordinal));
+        Assert.All(Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor"), caller => Assert.Equal(".ctor", caller.Name));
+        Assert.Equal(new[] { Hv1RunType, Hv2RunType },
+            Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor").Select(caller => caller.Type)
+                .Order(StringComparer.Ordinal));
+        Assert.All(Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor"),
+            caller => Assert.Equal(".ctor", caller.Name));
+    }
+
+    private const string Hv2RunType = "RSyncStageCraft.HumanActorPenumbraRun";
+    private const string Hv2PenumbraType = "RSyncStageCraft.Adapters.HumanActorPenumbraIpc";
+    private const string Hv2StageType = HumanPuppetNamespace + "HumanActorPenumbraStage";
+
+    /// <summary>HV-2's Penumbra writes: Debug only, and only in its adapter. No redraw: HV-2 undraws and draws through the game.</summary>
+    private static readonly string[] Hv2PenumbraWrites =
+    [
+        "CreateTemporaryCollection", "AssignTemporaryCollection", "DeleteTemporaryCollection", "AddTemporaryMod", "RemoveTemporaryMod",
+    ];
+
+    /// <summary>The caller is HV-2's adapter, or a type the compiler nests in it.</summary>
+    private static bool InHv2Adapter(MethodName caller) =>
+        caller.Type == Hv2PenumbraType || caller.Type.StartsWith(Hv2PenumbraType + "+", StringComparison.Ordinal);
+
+    [Fact]
+    public void TheHv2RunnerItsCommandAndItsPenumbraAdapterExistOnlyInDebug()
+    {
+        // HV-2: positive absence in Release, and in Debug one composition
+        // site: the connection constructs the runner, and only the runner
+        // constructs the Penumbra adapter and the stage. Every HV-2 Penumbra
+        // call, read or write, is in that adapter.
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        Assert.Equal(Debug, client.GetType(Hv2StageType) is not null);
+        Assert.Equal(Debug, client.GetType(HumanPuppetNamespace + "IHumanActorPenumbra") is not null);
+        Assert.Equal(Debug, Plugin.HasType(Hv2RunType));
+        Assert.Equal(Debug, Plugin.HasType(Hv2PenumbraType));
+        Assert.Equal(Debug, Plugin.UserStrings.Contains("/rschv2"));
+        foreach (var subscriber in Hv2PenumbraWrites.Append("GetMetaManipulations"))
+            Assert.Equal(Debug, Plugin.ReferencedTypeNames.Contains("Penumbra.Api.IpcSubscribers." + subscriber));
+        // Neither build subscribes to Penumbra's redraw event: nothing waits on a redraw queued in Penumbra.
+        Assert.DoesNotContain(Plugin.ReferencedTypeNames, name => name.StartsWith("Penumbra.Api.IpcSubscribers.GameObjectRedrawn", StringComparison.Ordinal));
+        if (!DebugBuild())
+            return;
+        Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
+            Plugin.Callers(target => target.Type == Hv2RunType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(Hv2RunType, ".ctor") },
+            Plugin.Callers(target => target.Type == Hv2PenumbraType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(Hv2RunType, ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == Hv2StageType && target.Name == ".ctor").ToArray());
+        var metaCallers = Plugin.ReferenceCallers(target => target.Type == "Penumbra.Api.IpcSubscribers.GetMetaManipulations").ToArray();
+        Assert.NotEmpty(metaCallers);
+        Assert.All(metaCallers, caller => Assert.True(InHv2Adapter(caller), caller.ToString()));
     }
 
     [Theory]
