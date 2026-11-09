@@ -76,6 +76,12 @@ public enum HumanActorPhase
     None,
     WaitingForReady,
     WaitingForModel,
+
+    /// <summary>HV-2 only: drawn at alpha 0, its temporary collection assigned, undrawn; waiting for the draw object to go.</summary>
+    WaitingForRelease,
+
+    /// <summary>HV-2 only: no human draw object seen after the undraw, and the draw requested again at alpha 0; waiting for a new one.</summary>
+    WaitingForRebuild,
     Visible,
 }
 
@@ -104,6 +110,17 @@ public enum HumanActorPhase
 /// creation. An object that is no longer provably this actor is forgotten
 /// and never touched again. A stop deletes the actor if it is still provably
 /// RSC's and refuses every later spawn until unload: nothing is retried.
+/// <para>HV-2 adds one optional stage, <see cref="HumanActorPenumbraStage"/>:
+/// without it the sequence is HV-1's exactly. With it, the actor stays at
+/// alpha 0 after its first draw while the stage assigns its temporary
+/// collection. RSC then redraws the actor itself with HV-1's own primitives,
+/// not Penumbra's redraw: the draw disabled, the human draw object seen gone,
+/// ready to draw again, the draw enabled at alpha 0, a new human draw object
+/// (built while the collection is assigned). Alpha 1 follows only once the
+/// stage has confirmed the rebuilt object's resources. Nothing is queued in
+/// Penumbra. On removal, a stop, a loss of ownership and unload,
+/// the stage's mod and collection are removed before the actor is undrawn
+/// and deleted.</para>
 /// </summary>
 public sealed class HumanActorBaseline
 {
@@ -112,6 +129,16 @@ public sealed class HumanActorBaseline
 
     /// <summary>Updates to wait for the human draw object after the draw.</summary>
     public const int ModelLimit = 300;
+
+    /// <summary>HV-2: updates to wait for the draw object to be released after the undraw, and for the new one after the draw.</summary>
+    public const int RedrawLimit = 300;
+
+    /// <summary>
+    /// HV-2: updates after the new human draw object first appears during
+    /// which packaged redirects not yet reported are read again (about 1 s at
+    /// 60 fps). A path resolved elsewhere refuses at once.
+    /// </summary>
+    public const int SettleLimit = 60;
 
     /// <summary>The draw is never requested on the spawn's own update, as in the posing tool's sequence.</summary>
     public const int FirstReadyCheck = 2;
@@ -125,13 +152,24 @@ public sealed class HumanActorBaseline
     private readonly IHumanActorBackend backend;
     private readonly Func<string?> sceneExit;
     private readonly Action<string> log;
+    private readonly HumanActorPenumbraStage? penumbra;
+    private readonly string prefix;
     private Actor? actor;
 
     public HumanActorBaseline(IHumanActorBackend backend, Func<string?> sceneExit, Action<string> log)
+        : this(backend, sceneExit, log, null, Prefix)
+    {
+    }
+
+    /// <summary>HV-2: the same sequence with the Penumbra stage, logging under <paramref name="prefix"/>.</summary>
+    public HumanActorBaseline(
+        IHumanActorBackend backend, Func<string?> sceneExit, Action<string> log, HumanActorPenumbraStage? penumbra, string prefix)
     {
         this.backend = backend ?? throw new ArgumentNullException(nameof(backend));
         this.sceneExit = sceneExit ?? throw new ArgumentNullException(nameof(sceneExit));
         this.log = log ?? throw new ArgumentNullException(nameof(log));
+        this.penumbra = penumbra;
+        this.prefix = prefix ?? throw new ArgumentNullException(nameof(prefix));
     }
 
     /// <summary>Test seam: where names come from (production: <see cref="HumanPuppetName.Create"/>).</summary>
@@ -161,6 +199,8 @@ public sealed class HumanActorBaseline
             return Refuse("the client-object functions are unavailable on this game version");
         if (Safe(sceneExit) is { } exit)
             return Refuse(exit);
+        if (penumbra is not null && !penumbra.Available)
+            return Refuse("Penumbra is unavailable or incompatible");
         var player = backend.LocalPlayer;
         if (player == 0 || backend.ReadPlacement(player) is not { } beside)
             return Refuse("the local player cannot be read");
@@ -213,7 +253,7 @@ public sealed class HumanActorBaseline
             return Lost(lostAfterCopies);
         var copied = backend.ReadFacts(address);
         var customizeFilled = copied.Customize is { Length: HumanPuppetFacts.CustomizeLength } bytes && bytes[0] != 0;
-        log(Prefix + $"after the copies: kind {ActorObjectKinds.Describe(copied.RawKind)} (created {ActorObjectKinds.Describe(created.RawKind)}), " +
+        log(prefix + $"after the copies: kind {ActorObjectKinds.Describe(copied.RawKind)} (created {ActorObjectKinds.Describe(created.RawKind)}), " +
             $"name kept {(string.Equals(copied.Name, name, StringComparison.Ordinal) && copied.NameTerminated ? "yes" : "no")}, " +
             $"customize filled {customizeFilled}, human model {copied.HasHumanModel} (no draw object before the draw).");
         if (copied.RawKind != PlayerKind)
@@ -237,7 +277,7 @@ public sealed class HumanActorBaseline
             return Halt("untargetable", "the actor is still targetable", candidate);
 
         candidate.Phase = HumanActorPhase.WaitingForReady;
-        log(Prefix + $"spawned at global index {candidate.GlobalIndex}: named, player kind, placed beside you, untargetable, " +
+        log(prefix + $"spawned at global index {candidate.GlobalIndex}: named, player kind, placed beside you, untargetable, " +
             "alpha 0; waiting to draw.");
         return true;
     }
@@ -262,7 +302,7 @@ public sealed class HumanActorBaseline
                     backend.EnableDraw(current.Address);
                     current.DrawUpdate = current.Updates;
                     current.Phase = HumanActorPhase.WaitingForModel;
-                    log(Prefix + $"ready to draw after {current.Updates} update(s); draw requested at alpha 0.");
+                    log(prefix + $"ready to draw after {current.Updates} update(s); draw requested at alpha 0.");
                 }
                 else if (current.Updates > ReadyLimit)
                 {
@@ -272,13 +312,88 @@ public sealed class HumanActorBaseline
             case HumanActorPhase.WaitingForModel:
                 if (backend.ReadFacts(current.Address).HasHumanModel)
                 {
+                    if (penumbra is not null)
+                    {
+                        log(prefix + $"drawn: human model after {current.Updates - current.DrawUpdate} update(s), still alpha 0.");
+                        var player = backend.ReadFacts(backend.LocalPlayer).GlobalIndex;
+                        if (player < 0 || player == current.GlobalIndex)
+                        {
+                            Halt("penumbra", "the local player's index cannot be read", current);
+                            break;
+                        }
+                        if (penumbra.Apply(current.GlobalIndex, player) is { } refused)
+                        {
+                            Halt("penumbra", refused, current);
+                            break;
+                        }
+                        if (OwnershipMismatch(current) is { } lostAtApply)
+                        {
+                            Lost(lostAtApply);
+                            break;
+                        }
+                        // RSC's own redraw: the first draw object was built before the
+                        // assignment, so it is released and a new one is built under it.
+                        backend.DisableDraw(current.Address);
+                        current.UndrawUpdate = current.Updates;
+                        current.Released = false;
+                        current.Phase = HumanActorPhase.WaitingForRelease;
+                        break;
+                    }
                     backend.SetAlpha(current.Address, 1f);
                     current.Phase = HumanActorPhase.Visible;
-                    log(Prefix + $"visible: human model after {current.Updates - current.DrawUpdate} update(s), alpha 1.");
+                    log(prefix + $"visible: human model after {current.Updates - current.DrawUpdate} update(s), alpha 1.");
                 }
                 else if (current.Updates - current.DrawUpdate > ModelLimit)
                 {
                     Halt("draw", $"no human draw object within {ModelLimit} updates of the draw", current);
+                }
+                break;
+            case HumanActorPhase.WaitingForRelease:
+                if (!current.Released && !backend.ReadFacts(current.Address).HasHumanModel)
+                    current.Released = true;
+                if (current.Released && current.Updates - current.UndrawUpdate >= FirstReadyCheck && backend.IsReadyToDraw(current.Address))
+                {
+                    backend.SetAlpha(current.Address, 0f);
+                    backend.EnableDraw(current.Address);
+                    current.RebuildUpdate = current.Updates;
+                    current.RebuiltUpdate = -1;
+                    current.Phase = HumanActorPhase.WaitingForRebuild;
+                    log(prefix + $"undrawn: no human draw object after the undraw, ready again after {current.Updates - current.UndrawUpdate} " +
+                        "update(s); draw requested again at alpha 0.");
+                }
+                else if (current.Updates - current.UndrawUpdate > RedrawLimit)
+                {
+                    Halt("redraw", current.Released
+                        ? $"not ready to draw again within {RedrawLimit} updates of the undraw"
+                        : "a human draw object was still reported after the undraw; the rebuild cannot be proved", current);
+                }
+                break;
+            case HumanActorPhase.WaitingForRebuild:
+                if (backend.ReadFacts(current.Address).HasHumanModel)
+                {
+                    var stage = penumbra!;
+                    if (current.RebuiltUpdate < 0)
+                        current.RebuiltUpdate = current.Updates;
+                    if (stage.Confirm(out var settling) is { } unconfirmed)
+                    {
+                        // Only redirects not yet reported are read again, within the window.
+                        if (settling && current.Updates - current.RebuiltUpdate < SettleLimit)
+                            break;
+                        Halt("redraw", unconfirmed, current);
+                        break;
+                    }
+                    if (OwnershipMismatch(current) is { } lostAtRebuild)
+                    {
+                        Lost(lostAtRebuild);
+                        break;
+                    }
+                    backend.SetAlpha(current.Address, 1f);
+                    current.Phase = HumanActorPhase.Visible;
+                    log(prefix + $"visible: redrawn after {current.Updates - current.UndrawUpdate} update(s), alpha 1.");
+                }
+                else if (current.Updates - current.RebuildUpdate > RedrawLimit)
+                {
+                    Halt("redraw", $"no new human draw object within {RedrawLimit} updates of the draw", current);
                 }
                 break;
         }
@@ -292,7 +407,7 @@ public sealed class HumanActorBaseline
         if (OwnershipMismatch(current) is { } lost)
             return Lost(lost);
         var empty = Delete(current);
-        log(Prefix + $"removed: deleted, slot empty {(empty ? "yes" : "no")}.");
+        log(prefix + $"removed: deleted, slot empty {(empty ? "yes" : "no")}.");
         if (!empty)
             Stop ??= "the slot did not read back empty after the delete";
         return empty;
@@ -303,20 +418,22 @@ public sealed class HumanActorBaseline
     {
         if (actor is not { } current)
         {
-            log(Prefix + $"unload: no actor, residue {Residue}.");
+            ReleasePenumbra(-1);
+            log(prefix + $"unload: no actor, residue {Residue}.");
             return;
         }
         if (OwnershipMismatch(current) is { } lost)
         {
             Lost(lost);
-            log(Prefix + $"unload: residue {Residue}.");
+            log(prefix + $"unload: residue {Residue}.");
             return;
         }
         var empty = Delete(current);
-        log(Prefix + $"unload: deleted, slot empty {(empty ? "yes" : "no")}, residue {Residue}.");
+        log(prefix + $"unload: deleted, slot empty {(empty ? "yes" : "no")}, residue {Residue}.");
     }
 
-    public string Status() => Prefix + $"status: {Phase}, stop {(Stop is null ? "none" : "latched")}, residue {Residue}.";
+    public string Status() => prefix + $"status: {Phase}, stop {(Stop is null ? "none" : "latched")}, residue {Residue}" +
+        (penumbra is null ? "." : $", temporary collection {(penumbra.Holding ? "held" : "none")}, collection residue {penumbra.Residue}.");
 
     /// <summary>Two yalms along the player's facing, turned to face the player.</summary>
     public static HumanActorPlacement InFrontOf(HumanActorPlacement player)
@@ -378,6 +495,8 @@ public sealed class HumanActorBaseline
     private bool Delete(Actor owned)
     {
         backend.SetAlpha(owned.Address, 0f);
+        // HV-2: the mod and the collection go before the actor they apply to.
+        ReleasePenumbra(owned.GlobalIndex);
         backend.DisableDraw(owned.Address);
         backend.DeleteComObject(owned.ComIndex);
         actor = null;
@@ -386,7 +505,7 @@ public sealed class HumanActorBaseline
 
     private bool Refuse(string why)
     {
-        log(Prefix + "refused: " + why + ".");
+        log(prefix + "refused: " + why + ".");
         return false;
     }
 
@@ -401,6 +520,7 @@ public sealed class HumanActorBaseline
             {
                 actor = null;
                 Residue++;
+                ReleasePenumbra(-1);
                 deleted = "not deleted: " + lost;
             }
             else
@@ -408,7 +528,7 @@ public sealed class HumanActorBaseline
                 deleted = Delete(owned) ? "deleted, slot empty yes" : "deleted, slot empty no";
             }
         }
-        log(Prefix + $"STOP at {step}: {why}; {deleted}.");
+        log(prefix + $"STOP at {step}: {why}; {deleted}.");
         return false;
     }
 
@@ -418,8 +538,17 @@ public sealed class HumanActorBaseline
         actor = null;
         Residue++;
         Stop ??= "ownership: " + why;
-        log(Prefix + $"STOP: the actor is no longer provably RSC's ({why}); it is not touched again.");
+        // The collection is RSC's by its id whatever became of the object; the object itself is not read.
+        ReleasePenumbra(-1);
+        log(prefix + $"STOP: the actor is no longer provably RSC's ({why}); it is not touched again.");
         return false;
+    }
+
+    /// <summary>HV-2: the stage's release; a problem latches a stop (the actor is still deleted).</summary>
+    private void ReleasePenumbra(int actorIndex)
+    {
+        if (penumbra?.Release(actorIndex) is { } problem)
+            Stop ??= "penumbra release: " + problem;
     }
 
     private static string? Safe(Func<string?> read)
@@ -445,6 +574,10 @@ public sealed class HumanActorBaseline
         public HumanActorPhase Phase { get; set; }
         public int Updates { get; set; }
         public int DrawUpdate { get; set; }
+        public int UndrawUpdate { get; set; }
+        public bool Released { get; set; }
+        public int RebuildUpdate { get; set; }
+        public int RebuiltUpdate { get; set; } = -1;
     }
 }
 #endif

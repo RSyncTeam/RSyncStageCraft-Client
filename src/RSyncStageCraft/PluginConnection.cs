@@ -43,6 +43,8 @@ internal sealed class PluginConnection
     private readonly HumanPuppetT3Run? t31;
     // HV-1 only: null unless a Debug build is loaded as a dev plugin.
     private readonly HumanActorBaselineRun? hv1;
+    // HV-2 only: null unless a Debug build is loaded as a dev plugin.
+    private readonly HumanActorPenumbraRun? hv2;
 #endif
 
     internal PluginConnection(
@@ -206,7 +208,7 @@ internal sealed class PluginConnection
             {
                 t31 = new HumanPuppetT3Run(pluginInterface, commands, framework, clientState, condition, data,
                     () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
-                        (hv1?.LiveCount ?? 0),
+                        (hv1?.LiveCount ?? 0) + (hv2?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
                         or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
                     () => scenes.Current,
@@ -222,7 +224,7 @@ internal sealed class PluginConnection
             {
                 hv1 = new HumanActorBaselineRun(commands, framework, clientState, condition,
                     () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
-                        (t31?.OccupiedSlots ?? 0),
+                        (t31?.OccupiedSlots ?? 0) + (hv2?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
                         or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
                     log);
@@ -231,6 +233,21 @@ internal sealed class PluginConnection
             {
                 hv1 = null;
                 log($"RSC HV-1 runner not loaded ({exception.GetType().Name}).");
+            }
+            // HV-2: HV-1's human with an actor-specific Penumbra temporary collection, under the same refusals.
+            try
+            {
+                hv2 = new HumanActorPenumbraRun(pluginInterface, commands, framework, clientState, condition,
+                    () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
+                        (t31?.OccupiedSlots ?? 0) + (hv1?.LiveCount ?? 0),
+                    () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
+                        or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
+                    log);
+            }
+            catch (Exception exception)
+            {
+                hv2 = null;
+                log($"RSC HV-2 runner not loaded ({exception.GetType().Name}).");
             }
         }
 #endif
@@ -355,6 +372,7 @@ internal sealed class PluginConnection
         // T3-1 (S2): its command first, then its puppet, before the framework update and the actor host stop.
         t31?.Shutdown();
         hv1?.Shutdown();
+        hv2?.Shutdown();
 #endif
         location.Changed -= OnLocationChanged;
         framework.Update -= OnFrameworkUpdate;
@@ -447,6 +465,14 @@ internal sealed class PluginConnection
         catch (Exception exception)
         {
             log($"RSC HV-1 tick error ({exception.GetType().Name}).");
+        }
+        try
+        {
+            hv2?.Tick();
+        }
+        catch (Exception exception)
+        {
+            log($"RSC HV-2 tick error ({exception.GetType().Name}).");
         }
 #endif
     }
