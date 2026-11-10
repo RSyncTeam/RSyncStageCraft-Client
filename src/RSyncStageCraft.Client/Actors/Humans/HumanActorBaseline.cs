@@ -121,6 +121,16 @@ public enum HumanActorPhase
 /// Penumbra. On removal, a stop, a loss of ownership and unload,
 /// the stage's mod and collection are removed before the actor is undrawn
 /// and deleted.</para>
+/// <para>HV-3 adds one optional stage after HV-2's,
+/// <see cref="HumanActorGlamourerStage"/>, used only together with it:
+/// without it the sequence is HV-2's exactly. With it, Glamourer is probed
+/// once the actor's Penumbra parent reads −1 and before the collection is
+/// made; on the first update after the actor is visible, it is probed again
+/// and one equipment-only state is applied and read back. Before every
+/// Glamourer call the actor must be provably RSC's, keep its name and the
+/// player's kind, have Penumbra parent −1, and be the only object with its
+/// name. Removal, a stop and unload revert it, by index, before the Penumbra
+/// release; a lost actor gets no Glamourer call.</para>
 /// </summary>
 public sealed class HumanActorBaseline
 {
@@ -146,6 +156,7 @@ public sealed class HumanActorBaseline
     public const float Distance = 2f;
 
     private const int PlayerKind = 1;
+    private const string GlamourerPrefix = "glamourer: ";
     private const int NameAttempts = 8;
     private const float PlacementTolerance = 0.01f;
 
@@ -153,6 +164,7 @@ public sealed class HumanActorBaseline
     private readonly Func<string?> sceneExit;
     private readonly Action<string> log;
     private readonly HumanActorPenumbraStage? penumbra;
+    private readonly HumanActorGlamourerStage? glamourer;
     private readonly string prefix;
     private Actor? actor;
 
@@ -164,7 +176,18 @@ public sealed class HumanActorBaseline
     /// <summary>HV-2: the same sequence with the Penumbra stage, logging under <paramref name="prefix"/>.</summary>
     public HumanActorBaseline(
         IHumanActorBackend backend, Func<string?> sceneExit, Action<string> log, HumanActorPenumbraStage? penumbra, string prefix)
+        : this(backend, sceneExit, log, penumbra, null, prefix)
     {
+    }
+
+    /// <summary>HV-3: HV-2's sequence with the Glamourer stage after it (which needs the Penumbra stage).</summary>
+    public HumanActorBaseline(
+        IHumanActorBackend backend, Func<string?> sceneExit, Action<string> log, HumanActorPenumbraStage? penumbra,
+        HumanActorGlamourerStage? glamourer, string prefix)
+    {
+        if (glamourer is not null && penumbra is null)
+            throw new ArgumentException("the Glamourer stage needs the Penumbra stage", nameof(glamourer));
+        this.glamourer = glamourer;
         this.backend = backend ?? throw new ArgumentNullException(nameof(backend));
         this.sceneExit = sceneExit ?? throw new ArgumentNullException(nameof(sceneExit));
         this.log = log ?? throw new ArgumentNullException(nameof(log));
@@ -321,9 +344,14 @@ public sealed class HumanActorBaseline
                             Halt("penumbra", "the local player's index cannot be read", current);
                             break;
                         }
-                        if (penumbra.Apply(current.GlobalIndex, player) is { } refused)
+                        var probe = glamourer is null ? null
+                            : new Func<string?>(() => glamourer.EarlyProbe(current.GlobalIndex, GlamourerChecks(current)));
+                        if (penumbra.Apply(current.GlobalIndex, player, probe) is { } refused)
                         {
-                            Halt("penumbra", refused, current);
+                            if (refused.StartsWith(GlamourerPrefix, StringComparison.Ordinal))
+                                Halt("glamourer", refused[GlamourerPrefix.Length..], current);
+                            else
+                                Halt("penumbra", refused, current);
                             break;
                         }
                         if (OwnershipMismatch(current) is { } lostAtApply)
@@ -396,6 +424,16 @@ public sealed class HumanActorBaseline
                     Halt("redraw", $"no new human draw object within {RedrawLimit} updates of the draw", current);
                 }
                 break;
+            case HumanActorPhase.Visible:
+                // HV-3: once, on the first update after the actor is visible.
+                if (glamourer is not null && !current.GlamourerTried)
+                {
+                    current.GlamourerTried = true;
+                    if (glamourer.Apply(current.GlobalIndex, GlamourerChecks(current)) is { } refusedApply)
+                        Halt("glamourer", refusedApply.StartsWith(GlamourerPrefix, StringComparison.Ordinal)
+                            ? refusedApply[GlamourerPrefix.Length..] : refusedApply, current);
+                }
+                break;
         }
     }
 
@@ -433,7 +471,8 @@ public sealed class HumanActorBaseline
     }
 
     public string Status() => prefix + $"status: {Phase}, stop {(Stop is null ? "none" : "latched")}, residue {Residue}" +
-        (penumbra is null ? "." : $", temporary collection {(penumbra.Holding ? "held" : "none")}, collection residue {penumbra.Residue}.");
+        (penumbra is null ? "." : $", temporary collection {(penumbra.Holding ? "held" : "none")}, collection residue {penumbra.Residue}" +
+            (glamourer is null ? "." : $", {glamourer.Status()}."));
 
     /// <summary>Two yalms along the player's facing, turned to face the player.</summary>
     public static HumanActorPlacement InFrontOf(HumanActorPlacement player)
@@ -470,6 +509,34 @@ public sealed class HumanActorBaseline
         return false;
     }
 
+    /// <summary>
+    /// HV-3, read-only, immediately before every Glamourer call: checks 1–5,
+    /// the name and the player's kind still read back, Penumbra parent −1 (an
+    /// index in the cutscene range otherwise resolves to its parent), and no
+    /// other object carries the name (Glamourer acts on every object with the
+    /// actor's identity). Null when all hold.
+    /// </summary>
+    private string? GlamourerChecks(Actor owned)
+    {
+        if (OwnershipMismatch(owned) is { } lost)
+            return lost;
+        var facts = backend.ReadFacts(owned.Address);
+        if (!string.Equals(facts.Name, owned.Name, StringComparison.Ordinal) || !facts.NameTerminated)
+            return "the actor's name no longer reads back";
+        if (facts.RawKind != PlayerKind)
+            return "the actor's kind is no longer the player's";
+        if (penumbra is null || !penumbra.ParentDetached(owned.GlobalIndex))
+            return "the actor's Penumbra parent does not read -1";
+        var length = backend.ObjectTableLength;
+        for (var index = 0; index < length; index++)
+        {
+            if (index != owned.GlobalIndex && backend.ScanEntry(index) is { } entry &&
+                string.Equals(entry.Name, owned.Name, StringComparison.OrdinalIgnoreCase))
+                return "another object carries the actor's name";
+        }
+        return null;
+    }
+
     /// <summary>Checks 1–5, read-only: null while the object is still exactly this actor.</summary>
     private string? OwnershipMismatch(Actor owned)
     {
@@ -495,6 +562,9 @@ public sealed class HumanActorBaseline
     private bool Delete(Actor owned)
     {
         backend.SetAlpha(owned.Address, 0f);
+        // HV-3: the Glamourer state is reverted while the actor still exists, before the Penumbra release.
+        if (glamourer?.Revert(owned.GlobalIndex, GlamourerChecks(owned)) is { } glamourerProblem)
+            Stop ??= glamourerProblem;
         // HV-2: the mod and the collection go before the actor they apply to.
         ReleasePenumbra(owned.GlobalIndex);
         backend.DisableDraw(owned.Address);
@@ -520,6 +590,7 @@ public sealed class HumanActorBaseline
             {
                 actor = null;
                 Residue++;
+                glamourer?.Abandon(lost);
                 ReleasePenumbra(-1);
                 deleted = "not deleted: " + lost;
             }
@@ -538,6 +609,8 @@ public sealed class HumanActorBaseline
         actor = null;
         Residue++;
         Stop ??= "ownership: " + why;
+        // HV-3: no Glamourer call: the index may now hold another object.
+        glamourer?.Abandon(why);
         // The collection is RSC's by its id whatever became of the object; the object itself is not read.
         ReleasePenumbra(-1);
         log(prefix + $"STOP: the actor is no longer provably RSC's ({why}); it is not touched again.");
@@ -578,6 +651,7 @@ public sealed class HumanActorBaseline
         public bool Released { get; set; }
         public int RebuildUpdate { get; set; }
         public int RebuiltUpdate { get; set; } = -1;
+        public bool GlamourerTried { get; set; }
     }
 }
 #endif

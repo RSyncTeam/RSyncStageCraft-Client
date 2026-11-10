@@ -58,6 +58,16 @@ public sealed class PluginPackageNoticeTests
         Assert.DoesNotContain(names, name => name.Contains("Tests", StringComparison.OrdinalIgnoreCase) || name.Contains("xunit", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void ThePackageBundlesNoNewtonsoftJson()
+    {
+        // HV-3's Debug-only Newtonsoft.Json reference resolves to Dalamud's own
+        // copy, which Dalamud loads for every plugin: no build ships its own.
+        var names = ReadPackage().Keys;
+        Assert.Contains("RSyncStageCraft.dll", names);
+        Assert.DoesNotContain(names, name => Path.GetFileName(name).StartsWith("Newtonsoft.Json", StringComparison.OrdinalIgnoreCase));
+    }
+
     /// <summary>File name to content, from latest.zip (Release) or the output folder (Debug).</summary>
     private static Dictionary<string, byte[]> ReadPackage()
     {

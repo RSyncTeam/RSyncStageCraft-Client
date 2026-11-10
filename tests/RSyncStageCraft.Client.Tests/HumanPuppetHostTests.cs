@@ -828,11 +828,28 @@ public sealed class HumanPuppetHostTests
     [InlineData("Revert")]
     public void NoHumanHostTypeHasAStateWritingMember(string name)
     {
-        var types = typeof(HumanPuppetHost).Assembly.GetTypes()
-            .Where(type => type.Namespace == "RSyncStageCraft.Core.Actors.Humans");
+        // H-12, amended for HV-3 (Debug only, owner-approved): exactly these
+        // three HV-3 types may name "ApplyState" and "Revert", because HV-3
+        // applies and reverts one equipment-only state by object index. They
+        // stay under every other row, and every other type stays under all rows.
+        string[] exempt = name is "ApplyState" or "Revert" ? Hv3StateTypes : [];
+        var all = typeof(HumanPuppetHost).Assembly.GetTypes()
+            .Where(type => type.Namespace == "RSyncStageCraft.Core.Actors.Humans").ToArray();
+        // The exemption is never vacuous: each named type exists.
+        Assert.All(Hv3StateTypes, exempted => Assert.Contains(all, type => type.FullName == exempted));
+        var types = all.Where(type => !exempt.Contains(type.FullName)).ToArray();
+        Assert.Equal(all.Length - exempt.Length, types.Length);
         var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
         Assert.All(types, type => Assert.DoesNotContain(type.GetMembers(flags), member => member.Name.Contains(name, StringComparison.OrdinalIgnoreCase)));
     }
+
+    /// <summary>HV-3's port, stage and state enum: the only H-12 exemption, for the "ApplyState" and "Revert" rows only.</summary>
+    private static readonly string[] Hv3StateTypes =
+    [
+        "RSyncStageCraft.Core.Actors.Humans.IHumanActorGlamourer",
+        "RSyncStageCraft.Core.Actors.Humans.HumanActorGlamourerStage",
+        "RSyncStageCraft.Core.Actors.Humans.HumanGlamourerState",
+    ];
 
     [Fact]
     public void BaselineReadsAreTheOnlyGlamourerCalls()
