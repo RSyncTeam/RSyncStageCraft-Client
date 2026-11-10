@@ -153,6 +153,14 @@ public sealed record HumanActorPenumbraPackage(
 /// longer resolve to it. A collection whose deletion was not confirmed is
 /// counted as residue. Nothing is persisted: a temporary collection lives
 /// only in Penumbra's memory, until Penumbra unloads.</para>
+/// <para>HV-3 (<see cref="ReleaseByDeletion"/>): once an assignment was
+/// attempted and the actor may still resolve to the collection, the mod is
+/// not removed first. Removing a temporary mod from a collection an actor
+/// resolves to makes Glamourer queue a reapply that keeps the actor's address
+/// for later frames, while the actor is deleted in this update. Deleting the
+/// assigned collection instead makes Penumbra (1.7.2.1) drop its temporary
+/// mods with no mod-setting event. Without an assignment the mod is removed
+/// first, as in HV-2: no actor resolves to the collection then.</para>
 /// </summary>
 public sealed class HumanActorPenumbraStage
 {
@@ -180,14 +188,25 @@ public sealed class HumanActorPenumbraStage
 
     public bool Available => Safe(() => penumbra.Available, false);
 
+    /// <summary>HV-3 only: the release described above. HV-2 leaves it false, so its release is unchanged.</summary>
+    public bool ReleaseByDeletion { get; init; }
+
+    /// <summary>HV-3: Penumbra's cutscene parent for the actor reads back as −1 (read only). False when unread.</summary>
+    public bool ParentDetached(int actorIndex) => Safe(() => penumbra.GetParent(actorIndex), null) == -1;
+
     /// <summary>True while a temporary collection is held.</summary>
     public bool Holding => held is not null;
 
     /// <summary>Temporary collections whose deletion was not confirmed.</summary>
     public int Residue { get; private set; }
 
-    /// <summary>Steps 1–5. Null when the collection is assigned to the actor alone; otherwise why not (anything made is then released).</summary>
-    public string? Apply(int actorIndex, int playerIndex)
+    /// <summary>
+    /// Steps 1–5. Null when the collection is assigned to the actor alone;
+    /// otherwise why not (anything made is then released). HV-3 passes
+    /// <paramref name="beforeCollection"/>, run once the parent reads −1 and
+    /// before anything is created: a non-null answer refuses with nothing made.
+    /// </summary>
+    public string? Apply(int actorIndex, int playerIndex, Func<string?>? beforeCollection = null)
     {
         if (held is not null)
             return "a temporary collection is already held";
@@ -211,6 +230,8 @@ public sealed class HumanActorPenumbraStage
             return "Penumbra does not identify the actor";
         if (before.IndividualSet)
             return "the actor's identity already has an individual collection";
+        if (beforeCollection?.Invoke() is { } refusedBefore)
+            return refusedBefore;
 
         // 3. The package: the player's resolved resources and manipulations, from a readable mod folder.
         var modDirectory = Safe(() => penumbra.ModDirectory(), null);
@@ -235,6 +256,7 @@ public sealed class HumanActorPenumbraStage
         if (!Safe(() => penumbra.AddTemporaryMod(Tag, id, paths, meta, Priority), false))
             return Undo("the temporary mod was refused");
         holding.ModAdded = true;
+        holding.AssignAttempted = true;
         switch (Safe(() => penumbra.Assign(id, actorIndex), HumanAssignmentResult.Failed))
         {
             case HumanAssignmentResult.Success:
@@ -338,6 +360,8 @@ public sealed class HumanActorPenumbraStage
         if (held is not { } holding)
             return null;
         held = null;
+        if (ReleaseByDeletion && holding.AssignAttempted && MayResolve(holding, actorIndex) is var assigned and not AssignmentReading.No)
+            return ReleaseWithCollection(holding, actorIndex, assigned == AssignmentReading.Yes);
         var removal = Safe(() => penumbra.RemoveTemporaryMod(Tag, holding.Collection, Priority), HumanModRemoval.Failed);
         var modRemoved = removal == HumanModRemoval.Removed || (!holding.ModAdded && removal == HumanModRemoval.NotPresent);
         var deleted = Safe(() => penumbra.DeleteTemporaryCollection(holding.Collection), false);
@@ -356,6 +380,49 @@ public sealed class HumanActorPenumbraStage
             return "the temporary collection's deletion was not confirmed";
         if (!modRemoved)
             return "the temporary mod's removal was not confirmed";
+        if (actorOff == "no")
+            return "the actor still resolved to the temporary collection";
+        if (actorOff == "no answer")
+            return "the actor's collection could not be read after the deletion";
+        return playerSame ? null : "the player's collection changed";
+    }
+
+    private enum AssignmentReading
+    {
+        No,
+        Yes,
+        Unknown,
+    }
+
+    /// <summary>Whether the actor may resolve to the collection: read when the actor is still provably RSC's, else unknown.</summary>
+    private AssignmentReading MayResolve(Held holding, int actorIndex)
+    {
+        if (actorIndex < 0)
+            return AssignmentReading.Unknown;
+        return Safe(() => penumbra.CollectionFor(actorIndex), null) is not { ObjectValid: true } reading ? AssignmentReading.Unknown
+            : reading.EffectiveCollection == holding.Collection ? AssignmentReading.Yes : AssignmentReading.No;
+    }
+
+    /// <summary>HV-3: the collection is deleted with the mod still in it, so no mod-setting event is raised for an actor that resolves to it.</summary>
+    private string? ReleaseWithCollection(Held holding, int actorIndex, bool assignedSeen)
+    {
+        var deleted = Safe(() => penumbra.DeleteTemporaryCollection(holding.Collection), false);
+        string actorOff = "not read";
+        if (actorIndex >= 0)
+        {
+            actorOff = Safe(() => penumbra.CollectionFor(actorIndex), null) is not { } reading ? "no answer"
+                : reading.EffectiveCollection != holding.Collection ? "yes" : "no";
+        }
+        var playerSame = Safe(() => penumbra.CollectionFor(holding.PlayerIndex), null) == holding.Player;
+        if (!deleted)
+            Residue++;
+        var mod = !holding.ModAdded ? "none added" : !deleted ? "no" : assignedSeen ? "with the collection" : "with the collection only if it was still assigned (not provable)";
+        log(prefix + $"Penumbra released: mod removed {mod}, collection deleted {(deleted ? "yes" : "no")}, actor off it {actorOff}, " +
+            $"player's collection unchanged {(playerSame ? "yes" : "no")}.");
+        if (!deleted)
+            return "the temporary collection's deletion was not confirmed";
+        if (holding.ModAdded && !assignedSeen)
+            return "the temporary mod's removal could not be confirmed (the assignment could not be read)";
         if (actorOff == "no")
             return "the actor still resolved to the temporary collection";
         if (actorOff == "no answer")
@@ -392,6 +459,7 @@ public sealed class HumanActorPenumbraStage
         public HumanCollectionReading Player { get; } = player;
         public HumanActorPenumbraPackage Package { get; } = package;
         public bool ModAdded { get; set; }
+        public bool AssignAttempted { get; set; }
     }
 }
 #endif

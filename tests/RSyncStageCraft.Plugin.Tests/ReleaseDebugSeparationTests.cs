@@ -355,11 +355,13 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv1RunType && target.Name == ".ctor").ToArray());
-        // HV-2 composes the same native adapter and baseline in its own runner.
-        Assert.Equal(new[] { Hv1RunType, Hv2RunType },
+        // HV-2 and HV-3 compose the same native adapter and baseline in their own runners.
+        // Ordinal order: HumanActorBaselineRun, HumanActorGlamourerRun, HumanActorPenumbraRun.
+        Assert.Equal(new[] { Hv1RunType, Hv3RunType, Hv2RunType },
             Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor").Select(caller => caller.Type).Order(StringComparer.Ordinal));
         Assert.All(Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor"), caller => Assert.Equal(".ctor", caller.Name));
-        Assert.Equal(new[] { Hv1RunType, Hv2RunType },
+        // Ordinal order: HumanActorBaselineRun, HumanActorGlamourerRun, HumanActorPenumbraRun.
+        Assert.Equal(new[] { Hv1RunType, Hv3RunType, Hv2RunType },
             Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor").Select(caller => caller.Type)
                 .Order(StringComparer.Ordinal));
         Assert.All(Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor"),
@@ -401,37 +403,128 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv2RunType && target.Name == ".ctor").ToArray());
-        Assert.Equal(new[] { new MethodName(Hv2RunType, ".ctor") },
-            Plugin.Callers(target => target.Type == Hv2PenumbraType && target.Name == ".ctor").ToArray());
-        Assert.Equal(new[] { new MethodName(Hv2RunType, ".ctor") },
-            Plugin.ReferenceCallers(target => target.Type == Hv2StageType && target.Name == ".ctor").ToArray());
+        // HV-3 composes the same Penumbra adapter and stage in its own runner.
+        Assert.Equal(new[] { new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv2RunType, ".ctor") },
+            Plugin.Callers(target => target.Type == Hv2PenumbraType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal).ToArray());
+        Assert.Equal(new[] { new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv2RunType, ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == Hv2StageType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
+                .ToArray());
         var metaCallers = Plugin.ReferenceCallers(target => target.Type == "Penumbra.Api.IpcSubscribers.GetMetaManipulations").ToArray();
         Assert.NotEmpty(metaCallers);
         Assert.All(metaCallers, caller => Assert.True(InHv2Adapter(caller), caller.ToString()));
     }
 
+    private const string Hv3RunType = "RSyncStageCraft.HumanActorGlamourerRun";
+    private const string Hv3GlamourerType = "RSyncStageCraft.Adapters.HumanActorGlamourerIpc";
+    private const string Hv3StageType = HumanPuppetNamespace + "HumanActorGlamourerStage";
+
+    /// <summary>HV-3's Glamourer state calls, by object index: Debug only, and only in its adapter.</summary>
+    private static readonly string[] Hv3GlamourerCalls = ["UnlockState", "ApplyState", "GetState", "RevertState"];
+
+    /// <summary>The caller is HV-3's adapter, or a type the compiler nests in it.</summary>
+    private static bool InHv3Adapter(MethodName caller) =>
+        caller.Type == Hv3GlamourerType || caller.Type.StartsWith(Hv3GlamourerType + "+", StringComparison.Ordinal);
+
     [Theory]
     [InlineData("ApplyState")]
-    [InlineData("ApplyStateName")]
     [InlineData("UnlockState")]
-    [InlineData("UnlockStateName")]
-    [InlineData("UnlockAll")]
+    [InlineData("GetState")]
     [InlineData("RevertState")]
+    [InlineData("ApplyStateName")]
+    [InlineData("UnlockStateName")]
+    [InlineData("GetStateName")]
+    [InlineData("GetStateBase64Name")]
+    [InlineData("UnlockAll")]
     [InlineData("RevertStateName")]
     [InlineData("RevertToAutomation")]
     [InlineData("RevertToAutomationName")]
+    [InlineData("ReapplyState")]
+    [InlineData("ReapplyStateName")]
+    [InlineData("ApplyDesign")]
+    [InlineData("ApplyDesignName")]
     [InlineData("SetItem")]
     [InlineData("SetItemName")]
+    [InlineData("SetMetaState")]
+    [InlineData("SetMetaStateName")]
     [InlineData("DeletePlayerState")]
     public void NoBuildReferencesAGlamourerStateWrite(string subscriber)
     {
-        // H-12: no state-writing Glamourer path, and no DeletePlayerState (P14),
-        // until a later candidate: the plugin names no such Glamourer.Api
-        // subscriber, calls no member of one, and holds no such IPC label.
+        if (DebugBuild() && Hv3GlamourerCalls.Contains(subscriber))
+        {
+            // Debug, HV-3 only: exactly this by-index subscriber (never its
+            // by-name variant, which the other cases forbid in both builds),
+            // called only by HV-3's adapter.
+            Assert.Equal(new[] { "Glamourer.Api.IpcSubscribers." + subscriber }, Plugin.ReferencedTypeNames
+                .Where(name => name.EndsWith("." + subscriber, StringComparison.Ordinal)).ToArray());
+            var callers = Plugin.ReferenceCallers(target => target.Type == "Glamourer.Api.IpcSubscribers." + subscriber).ToArray();
+            Assert.NotEmpty(callers);
+            Assert.All(callers, caller => Assert.True(InHv3Adapter(caller), caller.ToString()));
+            Assert.DoesNotContain(Plugin.ReferenceCallers(target => target.Type.StartsWith("Glamourer.", StringComparison.Ordinal) &&
+                target.Name == subscriber), caller => !InHv3Adapter(caller));
+            Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith("Glamourer." + subscriber, StringComparison.Ordinal));
+            return;
+        }
+        // H-12, both builds: no other state-writing Glamourer path, no
+        // by-name call, no design application and no DeletePlayerState (P14):
+        // the plugin names no such Glamourer.Api subscriber, calls no member
+        // of one, and holds no such IPC label. Release has none of HV-3's.
         Assert.DoesNotContain(Plugin.ReferencedTypeNames, name => name.EndsWith("." + subscriber, StringComparison.Ordinal));
         Assert.Empty(Plugin.ReferenceCallers(target => target.Type.StartsWith("Glamourer.", StringComparison.Ordinal) &&
             (target.Type.EndsWith("." + subscriber, StringComparison.Ordinal) || target.Name == subscriber)));
         Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith("Glamourer." + subscriber, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void EveryGlamourerSubscriberReferencedIsOnTheAllowlistAndNoneIsAnEvent()
+    {
+        // An allowlist, not only a denylist: any other Glamourer.Api
+        // subscriber (a write, a by-name call, an event) fails.
+        const string prefix = "Glamourer.Api.IpcSubscribers.";
+        var allowed = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "ApiVersion", "AddDesign", "GetDesignList", "GetDesignListExtended", "GetDesignBase64", "GetStateBase64",
+        };
+        if (DebugBuild())
+        {
+            allowed.Add("CanUnlock");
+            allowed.UnionWith(Hv3GlamourerCalls);
+        }
+        var referenced = Plugin.ReferencedTypeNames.Where(name => name.StartsWith(prefix, StringComparison.Ordinal))
+            .Select(name => name[prefix.Length..]).ToArray();
+        Assert.NotEmpty(referenced);
+        Assert.DoesNotContain(referenced, name => !allowed.Contains(name));
+        // No build subscribes to a Glamourer event: no RSC code runs inside a Glamourer call.
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Type.StartsWith("Glamourer.", StringComparison.Ordinal) && target.Name == "Subscriber"));
+        Assert.DoesNotContain(Plugin.ReferencedTypeNames, name => name.StartsWith("Glamourer.", StringComparison.Ordinal) &&
+            (name.Contains("StateChanged", StringComparison.Ordinal) || name.Contains("StateFinalized", StringComparison.Ordinal) ||
+             name.Contains("GPoseChanged", StringComparison.Ordinal) || name.Contains("EventSubscriber", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void TheHv3RunnerItsCommandAndItsGlamourerAdapterExistOnlyInDebug()
+    {
+        // HV-3: positive absence in Release, and in Debug one composition
+        // site: the connection constructs the runner, and only the runner
+        // constructs the Glamourer adapter and stage. The adapter reads no
+        // state as base64 and makes no design call.
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        Assert.Equal(Debug, client.GetType(Hv3StageType) is not null);
+        Assert.Equal(Debug, client.GetType(HumanPuppetNamespace + "IHumanActorGlamourer") is not null);
+        Assert.Equal(Debug, Plugin.HasType(Hv3RunType));
+        Assert.Equal(Debug, Plugin.HasType(Hv3GlamourerType));
+        Assert.Equal(Debug, Plugin.UserStrings.Contains("/rschv3"));
+        foreach (var subscriber in Hv3GlamourerCalls)
+            Assert.Equal(Debug, Plugin.ReferencedTypeNames.Contains("Glamourer.Api.IpcSubscribers." + subscriber));
+        if (!DebugBuild())
+            return;
+        Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
+            Plugin.Callers(target => target.Type == Hv3RunType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(Hv3RunType, ".ctor") },
+            Plugin.Callers(target => target.Type == Hv3GlamourerType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(Hv3RunType, ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == Hv3StageType && target.Name == ".ctor").ToArray());
+        Assert.DoesNotContain(Plugin.ReferenceCallers(target => target.Type.StartsWith("Glamourer.", StringComparison.Ordinal) &&
+            (target.Type.Contains("Base64", StringComparison.Ordinal) || target.Type.Contains("Design", StringComparison.Ordinal))), InHv3Adapter);
     }
 
     [Theory]
