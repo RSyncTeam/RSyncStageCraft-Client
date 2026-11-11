@@ -89,6 +89,18 @@ internal sealed class HumanActorGlamourerIpc : IHumanActorGlamourer
 
     public int RevertState(int objectIndex, uint key, ulong flags) => (int)revert.Invoke(objectIndex, key, (ApplyFlag)flags);
 
+    /// <summary>
+    /// HV-5 M1 only (C7, owner decision D8 option b): the whole state of
+    /// <paramref name="objectIndex"/> as compact JSON text, read with key 0
+    /// through the same by-index <c>GetState</c> subscriber. Read only;
+    /// nothing is decoded here. Null unless Glamourer answers Success.
+    /// </summary>
+    internal (int Code, string? Json) StateJson(int objectIndex)
+    {
+        var (code, state) = getState.Invoke(objectIndex, 0);
+        return ((int)code, code == GlamourerApiEc.Success ? state?.ToString(Newtonsoft.Json.Formatting.None) : null);
+    }
+
     public (int Code, bool IsLocked, bool CanUnlock) CanUnlock(int objectIndex, uint key)
     {
         var code = canUnlock.Invoke(objectIndex, key, out var isLocked, out var unlockable);

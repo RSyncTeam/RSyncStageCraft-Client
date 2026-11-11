@@ -49,6 +49,8 @@ internal sealed class PluginConnection
     private readonly HumanActorGlamourerRun? hv3;
     // HV-4 only: null unless a Debug build is loaded as a dev plugin.
     private readonly HumanActorCustomizePlusRun? hv4;
+    // HV-5 M1 only (capture and list; no actor): null unless a Debug build is loaded as a dev plugin.
+    private readonly HumanCatalogueRun? hv5;
 #endif
 
     internal PluginConnection(
@@ -285,6 +287,19 @@ internal sealed class PluginConnection
                 hv4 = null;
                 log($"RSC HV-4 runner not loaded ({exception.GetType().Name}).");
             }
+            // HV-5 M1: the local catalogue's capture and list only; it spawns nothing, so no actor count includes it.
+            try
+            {
+                hv5 = new HumanCatalogueRun(pluginInterface, commands, framework, clientState, condition, objects, paths.ConfigDirectory,
+                    () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
+                        or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
+                    log);
+            }
+            catch (Exception exception)
+            {
+                hv5 = null;
+                log($"RSC HV-5 runner not loaded ({exception.GetType().Name}).");
+            }
         }
 #endif
         framework.Update += OnFrameworkUpdate;
@@ -411,6 +426,7 @@ internal sealed class PluginConnection
         hv2?.Shutdown();
         hv3?.Shutdown();
         hv4?.Shutdown();
+        hv5?.Shutdown();
 #endif
         location.Changed -= OnLocationChanged;
         framework.Update -= OnFrameworkUpdate;
@@ -527,6 +543,14 @@ internal sealed class PluginConnection
         catch (Exception exception)
         {
             log($"RSC HV-4 tick error ({exception.GetType().Name}).");
+        }
+        try
+        {
+            hv5?.Tick();
+        }
+        catch (Exception exception)
+        {
+            log($"RSC HV-5 tick error ({exception.GetType().Name}).");
         }
 #endif
     }
