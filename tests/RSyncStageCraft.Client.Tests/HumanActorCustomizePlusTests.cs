@@ -23,6 +23,7 @@ public sealed class HumanActorCustomizePlusTests
     private readonly FakeHumanActorPenumbra penumbra;
     private readonly FakeHumanActorGlamourer glamourer;
     private readonly FakeHumanActorCustomizePlus customizePlus;
+    private readonly FakeHumanActorWorldSource worlds = new();
     private readonly List<string> lines = [];
     private HumanActorGlamourerStage? glamourerStage;
     private HumanActorCustomizePlusStage? stage;
@@ -50,7 +51,7 @@ public sealed class HumanActorCustomizePlusTests
             ModFolderReadable = folder => folder == FakeHumanActorPenumbra.ModRoot,
             ReleaseByDeletion = true,
         };
-        return new HumanActorBaseline(scene, () => null, lines.Add, penumbraStage, glamourerStage, stage, Prefix);
+        return new HumanActorBaseline(scene, () => null, lines.Add, penumbraStage, glamourerStage, stage, worlds, Prefix);
     }
 
     private static void Run(HumanActorBaseline baseline, int updates)
@@ -301,8 +302,10 @@ public sealed class HumanActorCustomizePlusTests
 
     [Theory]
     [InlineData("parent", "the actor's Customize+ parent does not read -1")]
-    [InlineData("world 0", "the actor's home world is not a real world")]
-    [InlineData("world any", "the actor's home world is not a real world")]
+    [InlineData("world 0", "the actor's home world reads 0, which is not a real world")]
+    [InlineData("world any", "the actor's home world reads 65535, which is not a real world")]
+    [InlineData("world other", "the actor's home world is not the selected world")]
+    [InlineData("player world", "the actor's home world is the player's")]
     [InlineData("penumbra parent", "the actor's Penumbra parent does not read -1")]
     [InlineData("second carrier", "another object carries the actor's name")]
     public void AFailedCheckBeforeTheApplyRefusesItWithNoProfileCall(string change, string why)
@@ -318,6 +321,12 @@ public sealed class HumanActorCustomizePlusTests
                 break;
             case "world any":
                 scene.At(200).World = ushort.MaxValue;
+                break;
+            case "world other":
+                scene.At(200).World = HumanActorW3.WorldId + 1;
+                break;
+            case "player world":
+                scene.Player.World = HumanActorW3.WorldId;
                 break;
             case "penumbra parent":
                 penumbra.Parents[200] = 0;
@@ -563,7 +572,17 @@ public sealed class HumanActorCustomizePlusTests
     {
         var penumbraStage = new HumanActorPenumbraStage(penumbra, lines.Add, Prefix);
         Assert.Throws<ArgumentException>(() => new HumanActorBaseline(scene, () => null, lines.Add, penumbraStage, null,
-            new HumanActorCustomizePlusStage(customizePlus, lines.Add, Prefix), Prefix));
+            new HumanActorCustomizePlusStage(customizePlus, lines.Add, Prefix), worlds, Prefix));
+    }
+
+    [Fact]
+    public void TheWorldSourceComesWithTheCustomizePlusStageAndOnlyWithIt()
+    {
+        var penumbraStage = new HumanActorPenumbraStage(penumbra, lines.Add, Prefix);
+        var hv3 = new HumanActorGlamourerStage(glamourer, lines.Add, Prefix);
+        Assert.Throws<ArgumentException>(() => new HumanActorBaseline(scene, () => null, lines.Add, penumbraStage, hv3,
+            new HumanActorCustomizePlusStage(customizePlus, lines.Add, Prefix), null, Prefix));
+        Assert.Throws<ArgumentException>(() => new HumanActorBaseline(scene, () => null, lines.Add, penumbraStage, hv3, null, worlds, Prefix));
     }
 
     [Fact]
@@ -579,11 +598,202 @@ public sealed class HumanActorCustomizePlusTests
         var baseline = new HumanActorBaseline(scene, () => null, lines.Add, penumbraStage, hv3, Prefix);
         Assert.True(baseline.Spawn());
         Run(baseline, ToVisible + 5);
+        // r1c: HV-3 reads no World row and writes no home world.
+        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("world ", StringComparison.Ordinal));
+        Assert.Equal(scene.CreatedWorld, scene.At(200).World);
+        Assert.Empty(worlds.Reads);
         Assert.True(baseline.Remove());
         Assert.Empty(CustomizePlusCalls);
         Assert.Null(baseline.Stop);
         Assert.DoesNotContain("customize+", baseline.Status(), StringComparison.Ordinal);
     }
+
+    // r1c: the home world, written once on RSC's own proven actor, after the copies and before
+    // the placement, the draw and every provider call; W-3 checked before anything is created.
+
+    [Theory]
+    [InlineData(ushort.MaxValue)]
+    [InlineData((ushort)0)]
+    public void TheHomeWorldIsWrittenAloneAfterTheCopiesAndBeforeThePlacementTheDrawAndEveryProviderCall(ushort created)
+    {
+        scene.CreatedWorld = created;
+        var baseline = Baseline();
+        Assert.True(baseline.Spawn(), string.Join(" | ", lines));
+        // English first, then the client's language; both read before the create.
+        Assert.Equal(new ushort[] { HumanActorW3.WorldId, HumanActorW3.WorldId }, worlds.Reads.ToArray());
+        Assert.True(IndexOf("copy 200<-200") < IndexOf("world 200 412"));
+        Assert.True(IndexOf("world 200 412") < IndexOf("place 200"));
+        Assert.Single(scene.Calls, call => call.StartsWith("world ", StringComparison.Ordinal));
+        Assert.DoesNotContain(scene.Calls.Take(IndexOf("world 200 412")), call => call.StartsWith("penumbra", StringComparison.Ordinal) ||
+            call.StartsWith("glamourer", StringComparison.Ordinal) || call.StartsWith("customize+", StringComparison.Ordinal) ||
+            call.StartsWith("draw", StringComparison.Ordinal));
+        Assert.Equal(HumanActorW3.WorldId, scene.At(200).World);
+        // The player is never written.
+        Assert.Equal(World, scene.Player.World);
+        Assert.Contains(Prefix + $"home world: after the copies {created}, written 412 (W-3), read back 412.", lines);
+
+        // The rest of HV-4 runs under W-3: HV-3's state, then the profile, then the removal.
+        Run(baseline, ToVisible + 2);
+        Assert.Null(baseline.Stop);
+        Assert.Equal(HumanCustomizePlusState.Applied, Stage.State);
+        Assert.True(baseline.Remove());
+        Assert.Contains("glamourer revert 200", scene.Calls);
+        Assert.Null(baseline.Stop);
+        Assert.Single(scene.Calls, call => call.StartsWith("world ", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AWorldEqualToThePlayersIsNeverLoggedAsANumber()
+    {
+        scene.CreatedWorld = World;
+        var baseline = Baseline();
+        Assert.True(baseline.Spawn(), string.Join(" | ", lines));
+        Assert.Contains(Prefix + "home world: after the copies the player's world, written 412 (W-3), read back 412.", lines);
+        Assert.DoesNotContain(lines, line => line.Contains(World.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnotherRealWorldLeftByTheCopiesIsNeverLoggedAsANumber()
+    {
+        scene.CreatedWorld = 21;
+        var baseline = Baseline();
+        Assert.True(baseline.Spawn(), string.Join(" | ", lines));
+        Assert.Contains(Prefix + "home world: after the copies another world, written 412 (W-3), read back 412.", lines);
+    }
+
+    [Fact]
+    public void AHomeWorldThatDoesNotReadBackStopsBeforeThePlacementTheDrawAndEveryProviderCall()
+    {
+        scene.WorldWriteIgnored = true;
+        var baseline = Baseline();
+        Assert.False(baseline.Spawn());
+        Assert.Equal("home world: the home world did not read back", baseline.Stop);
+        Assert.Contains("world 200 412", scene.Calls);
+        Assert.DoesNotContain("place 200", scene.Calls);
+        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("draw on", StringComparison.Ordinal) ||
+            call.StartsWith("penumbra", StringComparison.Ordinal) || call.StartsWith("glamourer", StringComparison.Ordinal) ||
+            call.StartsWith("customize+", StringComparison.Ordinal));
+        // RSC's own proven actor is deleted; nothing is retried.
+        Assert.False(scene.Exists(200));
+        Assert.Equal(0, baseline.Residue);
+        Assert.False(baseline.Spawn());
+    }
+
+    [Fact]
+    public void ASlotLostDuringTheHomeWorldWriteIsNotTouchedAgain()
+    {
+        scene.DuringWorldWrite = () => scene.Replace(200);
+        var baseline = Baseline();
+        Assert.False(baseline.Spawn());
+        Assert.StartsWith("ownership: after the home world: ", baseline.Stop, StringComparison.Ordinal);
+        Assert.Equal(1, baseline.Residue);
+        var stranger = scene.At(200);
+        Assert.Equal("Someone Else", stranger.Name);
+        Assert.Equal(0, stranger.World);
+        Assert.Equal(1f, stranger.Alpha);
+        Assert.DoesNotContain("place 200", scene.Calls);
+        Assert.DoesNotContain("delete 200", scene.Calls);
+        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("draw", StringComparison.Ordinal) ||
+            call.StartsWith("glamourer", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("english missing", "the selected World row could not be read")]
+    [InlineData("english row", "the World row read is not the selected row")]
+    [InlineData("internal name", "the selected World row's internal name changed")]
+    [InlineData("name", "the selected World row's name changed")]
+    [InlineData("data centre 12", "the selected World row's data centre changed")]
+    [InlineData("user type", "the selected World row's user type changed")]
+    [InlineData("region", "the selected World row's region changed")]
+    [InlineData("public", "the selected World row is public")]
+    [InlineData("client missing", "the selected World row could not be read in the client's language")]
+    [InlineData("client row", "the World row read in the client's language is not the selected row")]
+    [InlineData("client lower case", "the selected World row's name does not start with A-Z in the client's language")]
+    [InlineData("client macro byte", "the selected World row's name does not start with A-Z in the client's language")]
+    [InlineData("client empty", "the selected World row's name does not start with A-Z in the client's language")]
+    [InlineData("client name", "the selected World row's name differs in the client's language")]
+    [InlineData("client data centre 0", "the selected World row has no data centre in the client's language")]
+    [InlineData("client data centre 12", "the selected World row's data centre differs in the client's language")]
+    [InlineData("client public", "the selected World row is public in the client's language")]
+    [InlineData("player home w3", "the player's home world is the selected World row")]
+    [InlineData("player home 0", "the player's home world cannot be read")]
+    [InlineData("player home any", "the player's home world cannot be read")]
+    [InlineData("current w3", "the player's current world is the selected World row")]
+    [InlineData("current none", "the player's current world cannot be read")]
+    [InlineData("current 0", "the player's current world cannot be read")]
+    [InlineData("throws", "the World row or the player's worlds could not be read (InvalidOperationException)")]
+    public void AWorldCheckThatFailsRefusesBeforeAnythingIsCreated(string change, string why)
+    {
+        var row = FakeHumanActorWorldSource.W3Row;
+        switch (change)
+        {
+            case "english missing": worlds.English = null; break;
+            case "english row": worlds.English = row with { RowId = 413 }; break;
+            case "internal name": worlds.English = row with { InternalName = "Innocence" }; break;
+            case "name": worlds.English = row with { Name = "Pixie" }; break;
+            case "data centre 12": worlds.English = row with { DataCenter = 12 }; break;
+            case "user type": worlds.English = row with { UserType = 4 }; break;
+            case "region": worlds.English = row with { Region = 2 }; break;
+            case "public": worlds.English = row with { IsPublic = true }; break;
+            case "client missing": worlds.Client = null; break;
+            case "client row": worlds.Client = row with { RowId = 1 }; break;
+            case "client lower case": worlds.Client = row with { FirstNameByte = 't' }; break;
+            case "client macro byte": worlds.Client = row with { FirstNameByte = 0x02 }; break;
+            case "client empty": worlds.Client = row with { FirstNameByte = -1, Name = "" }; break;
+            case "client name": worlds.Client = row with { Name = "Tycoon" }; break;
+            case "client data centre 0": worlds.Client = row with { DataCenter = 0 }; break;
+            case "client data centre 12": worlds.Client = row with { DataCenter = 12 }; break;
+            case "client public": worlds.Client = row with { IsPublic = true }; break;
+            case "player home w3": scene.Player.World = HumanActorW3.WorldId; break;
+            case "player home 0": scene.Player.World = 0; break;
+            case "player home any": scene.Player.World = ushort.MaxValue; break;
+            case "current w3": worlds.CurrentWorld = HumanActorW3.WorldId; break;
+            case "current none": worlds.CurrentWorld = null; break;
+            case "current 0": worlds.CurrentWorld = 0; break;
+            default: worlds.Throws = true; break;
+        }
+        var baseline = Baseline();
+        Assert.False(baseline.Spawn());
+        Assert.Contains(Prefix + "refused: " + why + ".", lines);
+        // Nothing created, written or called; a refusal does not latch.
+        Assert.DoesNotContain("create", scene.Calls);
+        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("world ", StringComparison.Ordinal));
+        Assert.Empty(CustomizePlusCalls);
+        Assert.Null(baseline.Stop);
+        Assert.False(scene.Exists(200));
+    }
+
+    [Fact]
+    public void AWorldChangedBeforeTheGlamourerApplyRefusesItWithNoStateCreated()
+    {
+        var baseline = Baseline();
+        Assert.True(baseline.Spawn());
+        Run(baseline, ToVisible);
+        Assert.Equal(HumanActorPhase.Visible, baseline.Phase);
+        scene.At(200).World = HumanActorW3.WorldId + 1;
+        Run(baseline, 1);
+        Assert.Equal("glamourer: the actor's home world is not the selected world", baseline.Stop);
+        Assert.DoesNotContain("glamourer apply 200", scene.Calls);
+        Assert.DoesNotContain("customize+ apply 200", scene.Calls);
+        Assert.False(scene.Exists(200));
+    }
+
+    [Fact]
+    public void AWorldChangedBeforeTheRemovalLeavesTheGlamourerStateUnrevertedAndRecorded()
+    {
+        var baseline = Applied();
+        scene.At(200).World = HumanActorW3.WorldId + 1;
+        var from = scene.Calls.Count;
+        Assert.True(baseline.Remove());
+        // The profile still goes by its receipt; the revert is not called under another world; the actor is deleted.
+        Assert.Contains("customize+ delete", scene.Calls.Skip(from));
+        Assert.DoesNotContain("glamourer revert 200", scene.Calls.Skip(from));
+        Assert.Contains("penumbra delete", scene.Calls.Skip(from));
+        Assert.Equal("glamourer cleanup: revert not called: the actor's home world is not the selected world", baseline.Stop);
+        Assert.Equal(HumanCustomizePlusState.Removed, Stage.State);
+        Assert.False(scene.Exists(200));
+    }
+
 
     [Fact]
     public void ThePortHasNoDeletionByIndexAndNoPersistentProfileCall()
@@ -597,6 +807,36 @@ public sealed class HumanActorCustomizePlusTests
         var delete = typeof(IHumanActorCustomizePlus).GetMethod(nameof(IHumanActorCustomizePlus.DeleteTemporaryProfile))!;
         Assert.Equal(typeof(Guid), Assert.Single(delete.GetParameters()).ParameterType);
     }
+}
+
+/// <summary>
+/// A synthetic World source for HV-4 r1c: W-3's row as F11 re-read it on
+/// 2026-11-11 (game 2026.11.03), in English and in the client's language, and
+/// a current world other than W-3. Every row read is recorded.
+/// </summary>
+public sealed class FakeHumanActorWorldSource : IHumanActorWorldSource
+{
+    public static readonly HumanActorWorldRow W3Row = new(412, "Titania", "Titania", 'T', 6, 5, 1, false);
+
+    public HumanActorWorldRow? English { get; set; } = W3Row;
+    public HumanActorWorldRow? Client { get; set; } = W3Row;
+    public ushort? CurrentWorld { get; set; } = 21;
+    public bool Throws { get; set; }
+    public List<ushort> Reads { get; } = [];
+
+    public HumanActorWorldRow? EnglishRow(ushort rowId)
+    {
+        Reads.Add(rowId);
+        return Throws ? throw new InvalidOperationException() : English;
+    }
+
+    public HumanActorWorldRow? ClientRow(ushort rowId)
+    {
+        Reads.Add(rowId);
+        return Client;
+    }
+
+    public ushort? PlayerCurrentWorld() => CurrentWorld;
 }
 
 /// <summary>

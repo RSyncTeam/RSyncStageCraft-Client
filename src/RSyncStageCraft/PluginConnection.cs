@@ -64,6 +64,7 @@ internal sealed class PluginConnection
         IObjectTable objects,
 #if RSC_DEVELOPMENT
         ICommandManager commands,
+        IPlayerState playerState,
 #endif
         Action<string> log)
     {
@@ -80,6 +81,7 @@ internal sealed class PluginConnection
         ArgumentNullException.ThrowIfNull(log);
 #if RSC_DEVELOPMENT
         ArgumentNullException.ThrowIfNull(commands);
+        ArgumentNullException.ThrowIfNull(playerState);
 #endif
         this.targets = targets;
         // Entering GPose or a cutscene is treated like leaving the place for
@@ -271,7 +273,7 @@ internal sealed class PluginConnection
             // HV-4: HV-3's human with one Customize+ temporary profile, under the same refusals.
             try
             {
-                hv4 = new HumanActorCustomizePlusRun(pluginInterface, commands, framework, clientState, condition,
+                hv4 = new HumanActorCustomizePlusRun(pluginInterface, commands, framework, clientState, condition, data, playerState,
                     () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
                         (t31?.OccupiedSlots ?? 0) + (hv1?.LiveCount ?? 0) + (hv2?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured

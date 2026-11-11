@@ -43,6 +43,9 @@ public interface IHumanActorBackend
     /// <summary>The name buffer only (the name and its NUL).</summary>
     void WriteName(nint actor, string name);
 
+    /// <summary>HV-4 only: <c>Character.HomeWorld</c> and nothing else, on RSC's own proven actor.</summary>
+    void WriteHomeWorld(nint actor, ushort homeWorld);
+
     /// <summary>
     /// <c>CharacterSetup.CopyFromCharacter</c>: the position flag (which
     /// includes the rotation) from another object; no flag when
@@ -140,6 +143,14 @@ public enum HumanActorPhase
 /// Customize+ parent reads −1, the home world is a real one and the name is
 /// not the player's. Removal, a stop, a loss of ownership and unload delete it
 /// by its receipt first, before the Glamourer revert.</para>
+/// <para>HV-4 also initializes the actor's identity (r1c): before anything
+/// is created, W-3's row (<see cref="HumanActorW3"/>) and the player's worlds
+/// are read and checked; after the copies and their checks, and before the
+/// placement, the draw and any provider call, <c>HomeWorld</c> alone is
+/// written on the proven actor, ownership is checked again and the world,
+/// name and kind are read back. Every Glamourer check (the early probe, the
+/// apply and the revert) and the Customize+ apply then require W-3. Without
+/// the Customize+ stage none of this happens.</para>
 /// </summary>
 public sealed class HumanActorBaseline
 {
@@ -176,6 +187,7 @@ public sealed class HumanActorBaseline
     private readonly HumanActorPenumbraStage? penumbra;
     private readonly HumanActorGlamourerStage? glamourer;
     private readonly HumanActorCustomizePlusStage? customizePlus;
+    private readonly IHumanActorWorldSource? world;
     private readonly string prefix;
     private Actor? actor;
 
@@ -195,18 +207,25 @@ public sealed class HumanActorBaseline
     public HumanActorBaseline(
         IHumanActorBackend backend, Func<string?> sceneExit, Action<string> log, HumanActorPenumbraStage? penumbra,
         HumanActorGlamourerStage? glamourer, string prefix)
-        : this(backend, sceneExit, log, penumbra, glamourer, null, prefix)
+        : this(backend, sceneExit, log, penumbra, glamourer, null, null, prefix)
     {
     }
 
-    /// <summary>HV-4: HV-3's sequence with the Customize+ stage after it (which needs the Glamourer stage).</summary>
+    /// <summary>
+    /// HV-4: HV-3's sequence with the Customize+ stage after it (which needs
+    /// the Glamourer stage) and W-3's identity initialization (which needs the
+    /// world source; the source is accepted only with the Customize+ stage).
+    /// </summary>
     public HumanActorBaseline(
         IHumanActorBackend backend, Func<string?> sceneExit, Action<string> log, HumanActorPenumbraStage? penumbra,
-        HumanActorGlamourerStage? glamourer, HumanActorCustomizePlusStage? customizePlus, string prefix)
+        HumanActorGlamourerStage? glamourer, HumanActorCustomizePlusStage? customizePlus, IHumanActorWorldSource? world, string prefix)
     {
         if (customizePlus is not null && glamourer is null)
             throw new ArgumentException("the Customize+ stage needs the Glamourer stage", nameof(customizePlus));
+        if ((customizePlus is null) != (world is null))
+            throw new ArgumentException("the world source comes with the Customize+ stage and only with it", nameof(world));
         this.customizePlus = customizePlus;
+        this.world = world;
         if (glamourer is not null && penumbra is null)
             throw new ArgumentException("the Glamourer stage needs the Penumbra stage", nameof(glamourer));
         this.glamourer = glamourer;
@@ -249,6 +268,9 @@ public sealed class HumanActorBaseline
         var player = backend.LocalPlayer;
         if (player == 0 || backend.ReadPlacement(player) is not { } beside)
             return Refuse("the local player cannot be read");
+        // HV-4 only: W-3's row, in English and in the client's language, and the player's worlds, read only, before anything is created.
+        if (world is not null && WorldRefusal(world, player) is { } worldRefusal)
+            return Refuse(worldRefusal);
 
         // 1. A name no object in the table carries (ignoring case and world).
         var name = FreshName();
@@ -307,6 +329,33 @@ public sealed class HumanActorBaseline
             return Halt("copy", "the copies changed the name", candidate);
         if (!customizeFilled)
             return Halt("copy", "the copies left no appearance", candidate);
+
+        // 4b. HV-4 only: the home world alone, on the proven actor, after the copies and before the
+        // placement, the draw and any provider call; ownership again, then the world, name and kind read back.
+        if (world is not null)
+        {
+            if (Write(candidate, "home world", owned => backend.WriteHomeWorld(owned, HumanActorW3.WorldId)) is { } lostAtWorld)
+                return Lost(lostAtWorld);
+            if (OwnershipMismatch(candidate) is { } lostAfterWorld)
+                return Lost("after the home world: " + lostAfterWorld);
+            var worlded = backend.ReadFacts(address);
+            if (worlded.HomeWorld != HumanActorW3.WorldId)
+                return Halt("home world", "the home world did not read back", candidate);
+            if (!string.Equals(worlded.Name, name, StringComparison.Ordinal) || !worlded.NameTerminated)
+                return Halt("home world", "the name did not read back after the home world", candidate);
+            if (worlded.RawKind != PlayerKind)
+                return Halt("home world", "the kind is no longer the player's after the home world", candidate);
+            // The value the copies left is reported (r1c's diagnosis). Only 0 and AnyWorld are logged as numbers:
+            // a real world, the player's home or current one included, is never named.
+            var left = copied.HomeWorld switch
+            {
+                0 => "0",
+                ushort.MaxValue => "65535",
+                _ when copied.HomeWorld == backend.ReadFacts(player).HomeWorld => "the player's world",
+                _ => "another world",
+            };
+            log(prefix + $"home world: after the copies {left}, written {HumanActorW3.WorldId} (W-3), read back {worlded.HomeWorld}.");
+        }
 
         // 5. Beside the player, facing them; untargetable.
         var placement = InFrontOf(beside);
@@ -560,6 +609,8 @@ public sealed class HumanActorBaseline
             return "the actor's name no longer reads back";
         if (facts.RawKind != PlayerKind)
             return "the actor's kind is no longer the player's";
+        if (world is not null && HomeWorldRefusal(facts.HomeWorld) is { } wrongWorld)
+            return wrongWorld;
         if (penumbra is null || !penumbra.ParentDetached(owned.GlobalIndex))
             return "the actor's Penumbra parent does not read -1";
         var length = backend.ObjectTableLength;
@@ -586,12 +637,44 @@ public sealed class HumanActorBaseline
         if (customizePlus is null || !customizePlus.ParentDetached(owned.GlobalIndex))
             return "the actor's Customize+ parent does not read -1";
         var facts = backend.ReadFacts(owned.Address);
+        // Defence in depth: GlamourerChecks (above, with the world source always present here) refuses these first.
         if (facts.HomeWorld is 0 or ushort.MaxValue)
-            return "the actor's home world is not a real world";
+            return $"the actor's home world reads {facts.HomeWorld}, which is not a real world";
+        if (facts.HomeWorld != HumanActorW3.WorldId)
+            return "the actor's home world is not the selected world";
         var player = backend.ReadFacts(backend.LocalPlayer);
         if (player.Name is null || string.Equals(player.Name, owned.Name, StringComparison.OrdinalIgnoreCase))
             return "the actor's name cannot be told apart from the player's";
+        if (player.HomeWorld == facts.HomeWorld)
+            return "the actor's home world is the player's";
         return null;
+    }
+
+    /// <summary>HV-4: the actor's home world must read W-3. Null when it does; 0 and AnyWorld are named, any other world is not.</summary>
+    private static string? HomeWorldRefusal(ushort homeWorld) => homeWorld switch
+    {
+        0 or ushort.MaxValue => $"the actor's home world reads {homeWorld}, which is not a real world",
+        HumanActorW3.WorldId => null,
+        _ => "the actor's home world is not the selected world",
+    };
+
+    /// <summary>
+    /// HV-4, read-only, before anything is created: W-3's row in English and in
+    /// the client's language, then the player's home and current worlds. Null
+    /// when all hold; a read that throws refuses.
+    /// </summary>
+    private string? WorldRefusal(IHumanActorWorldSource source, nint player)
+    {
+        try
+        {
+            return HumanActorW3.RowMismatch(source.EnglishRow(HumanActorW3.WorldId)) ??
+                HumanActorW3.ClientRowMismatch(source.ClientRow(HumanActorW3.WorldId)) ??
+                HumanActorW3.PlayerWorldMismatch(backend.ReadFacts(player).HomeWorld, source.PlayerCurrentWorld());
+        }
+        catch (Exception exception)
+        {
+            return $"the World row or the player's worlds could not be read ({exception.GetType().Name})";
+        }
     }
 
     /// <summary>Checks 1–5, read-only: null while the object is still exactly this actor.</summary>

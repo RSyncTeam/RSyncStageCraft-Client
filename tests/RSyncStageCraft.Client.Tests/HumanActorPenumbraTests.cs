@@ -119,6 +119,9 @@ public sealed class HumanActorPenumbraTests
             "0 swap(s) not reported, 0 other redirect(s); parent -1, temporary collection effective, player's collection unchanged.", lines);
         Assert.Contains("RSC HV-2 visible: redrawn after 3 update(s), alpha 1.", lines);
         Assert.Null(baseline.Stop);
+        // r1c: HV-2 writes no home world.
+        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("world ", StringComparison.Ordinal));
+        Assert.Equal(scene.CreatedWorld, actor.World);
     }
 
     [Fact]
@@ -130,6 +133,7 @@ public sealed class HumanActorPenumbraTests
         Assert.Equal(HumanActorPhase.Visible, plain.Phase);
         Assert.DoesNotContain(scene.Calls, call => call.StartsWith("penumbra", StringComparison.Ordinal) || call == "draw off 200");
         Assert.Single(scene.Calls, call => call == "draw on 200");
+        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("world ", StringComparison.Ordinal));
         Assert.True(plain.Remove());
         Assert.False(scene.Exists(200));
     }
@@ -779,6 +783,8 @@ internal sealed class StickyModelBackend(FakeHumanActorScene scene) : IHumanActo
     public nint ObjectTableEntry(int globalIndex) => scene.ObjectTableEntry(globalIndex);
     public HumanPuppetScanEntry? ScanEntry(int globalIndex) => scene.ScanEntry(globalIndex);
     public void WriteName(nint actor, string name) => scene.WriteName(actor, name);
+
+    public void WriteHomeWorld(nint actor, ushort homeWorld) => scene.WriteHomeWorld(actor, homeWorld);
     public void CopyCharacter(nint actor, nint source) => scene.CopyCharacter(actor, source);
     public HumanActorPlacement? ReadPlacement(nint address) => scene.ReadPlacement(address);
     public void Place(nint actor, HumanActorPlacement placement) => scene.Place(actor, placement);
