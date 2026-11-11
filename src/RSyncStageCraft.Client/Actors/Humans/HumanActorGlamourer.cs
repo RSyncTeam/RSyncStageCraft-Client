@@ -416,7 +416,9 @@ public sealed class HumanActorGlamourerStage
             text.Append($"\"{slot}\":{{\"ItemId\":{item},\"Apply\":true,\"ApplyStain\":false,\"Stain\":0,\"Stain2\":0}},");
         text.Append("\"Hat\":{\"Show\":true,\"Apply\":false},\"VieraEars\":{\"Show\":true,\"Apply\":false},")
             .Append("\"Visor\":{\"IsToggled\":false,\"Apply\":false},\"Weapon\":{\"Show\":true,\"Apply\":false}},")
-            .Append("\"Customize\":{\"ModelId\":0}}");
+            // Race and clan are stated (Hyur 1, Midlander 1: what Glamourer 1.7.1.3 defaults Unknown to, with a
+            // warning) and never applied; the equipment-only flags remove every customize application anyway.
+            .Append("\"Customize\":{\"ModelId\":0,\"Race\":{\"Value\":1,\"Apply\":false},\"Clan\":{\"Value\":1,\"Apply\":false}}}");
         return text.ToString();
     }
 }

@@ -172,7 +172,19 @@ public sealed class HumanActorGlamourerTests
         Assert.DoesNotContain("MainHand", text, StringComparison.Ordinal);
         Assert.DoesNotContain("OffHand", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Identifier", text, StringComparison.Ordinal);
-        Assert.Equal(new[] { "ModelId" }, root.GetProperty("Customize").EnumerateObject().Select(property => property.Name).ToArray());
+        // Customize: model 0, and race and clan stated as Hyur (1) and Midlander (1) so that Glamourer 1.7.1.3's loader has
+        // nothing to default; neither is applied, and no other customize value is present.
+        var customize = root.GetProperty("Customize");
+        Assert.Equal(new[] { "ModelId", "Race", "Clan" }, customize.EnumerateObject().Select(property => property.Name).ToArray());
+        Assert.Equal(0, customize.GetProperty("ModelId").GetInt32());
+        foreach (var name in new[] { "Race", "Clan" })
+        {
+            var entry = customize.GetProperty(name);
+            Assert.Equal(new[] { "Value", "Apply" }, entry.EnumerateObject().Select(property => property.Name).ToArray());
+            Assert.Equal(1, entry.GetProperty("Value").GetInt32());
+            Assert.False(entry.GetProperty("Apply").GetBoolean());
+        }
+        Assert.DoesNotContain("\"Apply\":true", customize.GetRawText(), StringComparison.Ordinal);
     }
 
     [Theory]
