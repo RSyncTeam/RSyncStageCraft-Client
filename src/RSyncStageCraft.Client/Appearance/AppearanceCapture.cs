@@ -572,7 +572,7 @@ public static class AppearanceCapturePlanner
     }
 
     /// <summary>The one alias, applied to every reported game path (vanilla, swapped and local sources alike).</summary>
-    private static IReadOnlyList<AppearanceResourceEntry> CanonicalizeReported(IReadOnlyList<AppearanceResourceEntry> resources) =>
+    internal static IReadOnlyList<AppearanceResourceEntry> CanonicalizeReported(IReadOnlyList<AppearanceResourceEntry> resources) =>
         resources.Select(entry => entry with
         {
             GamePaths = entry.GamePaths.Select(path => SkeletonResourcePaths.TryCanonicalizeReported(path, out var canonical) ? canonical : path).ToArray(),
@@ -598,7 +598,7 @@ public static class AppearanceCapturePlanner
             gamePath.AsSpan(HumanFolder.Length + 4).StartsWith(SkeletonFolder, StringComparison.Ordinal);
     }
 
-    private sealed record SkeletonGroupPlan(
+    internal sealed record SkeletonGroupPlan(
         AppearanceSkeletonGroupOutcome Outcome,
         IReadOnlyList<(string GamePath, AppearanceBlobRef Blob, string Canonical)>? Members = null,
         string? Conflict = null);
@@ -612,7 +612,7 @@ public static class AppearanceCapturePlanner
     /// <paramref name="hashed"/> so the conflict check treats them like any
     /// other captured file.
     /// </summary>
-    private static async Task<SkeletonGroupPlan> PlanSkeletonGroupAsync(
+    internal static async Task<SkeletonGroupPlan> PlanSkeletonGroupAsync(
         AppearanceCaptureRead read,
         AppearanceCaptureOptions options,
         IEnumerable<string> reportedGamePaths,
