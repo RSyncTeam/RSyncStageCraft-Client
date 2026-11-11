@@ -355,13 +355,13 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv1RunType && target.Name == ".ctor").ToArray());
-        // HV-2 and HV-3 compose the same native adapter and baseline in their own runners.
-        // Ordinal order: HumanActorBaselineRun, HumanActorGlamourerRun, HumanActorPenumbraRun.
-        Assert.Equal(new[] { Hv1RunType, Hv3RunType, Hv2RunType },
+        // HV-2, HV-3 and HV-4 compose the same native adapter and baseline in their own runners.
+        // Ordinal order: HumanActorBaselineRun, HumanActorCustomizePlusRun, HumanActorGlamourerRun, HumanActorPenumbraRun.
+        Assert.Equal(new[] { Hv1RunType, Hv4RunType, Hv3RunType, Hv2RunType },
             Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor").Select(caller => caller.Type).Order(StringComparer.Ordinal));
         Assert.All(Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor"), caller => Assert.Equal(".ctor", caller.Name));
-        // Ordinal order: HumanActorBaselineRun, HumanActorGlamourerRun, HumanActorPenumbraRun.
-        Assert.Equal(new[] { Hv1RunType, Hv3RunType, Hv2RunType },
+        // Ordinal order: HumanActorBaselineRun, HumanActorCustomizePlusRun, HumanActorGlamourerRun, HumanActorPenumbraRun.
+        Assert.Equal(new[] { Hv1RunType, Hv4RunType, Hv3RunType, Hv2RunType },
             Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor").Select(caller => caller.Type)
                 .Order(StringComparer.Ordinal));
         Assert.All(Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor"),
@@ -403,10 +403,10 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv2RunType && target.Name == ".ctor").ToArray());
-        // HV-3 composes the same Penumbra adapter and stage in its own runner.
-        Assert.Equal(new[] { new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv2RunType, ".ctor") },
+        // HV-3 and HV-4 compose the same Penumbra adapter and stage in their own runners.
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv2RunType, ".ctor") },
             Plugin.Callers(target => target.Type == Hv2PenumbraType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal).ToArray());
-        Assert.Equal(new[] { new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv2RunType, ".ctor") },
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv2RunType, ".ctor") },
             Plugin.ReferenceCallers(target => target.Type == Hv2StageType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
                 .ToArray());
         var metaCallers = Plugin.ReferenceCallers(target => target.Type == "Penumbra.Api.IpcSubscribers.GetMetaManipulations").ToArray();
@@ -519,13 +519,65 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv3RunType && target.Name == ".ctor").ToArray());
-        Assert.Equal(new[] { new MethodName(Hv3RunType, ".ctor") },
-            Plugin.Callers(target => target.Type == Hv3GlamourerType && target.Name == ".ctor").ToArray());
-        Assert.Equal(new[] { new MethodName(Hv3RunType, ".ctor") },
-            Plugin.ReferenceCallers(target => target.Type == Hv3StageType && target.Name == ".ctor").ToArray());
+        // HV-4 composes the same Glamourer adapter and stage in its own runner.
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor") },
+            Plugin.Callers(target => target.Type == Hv3GlamourerType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
+                .ToArray());
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == Hv3StageType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
+                .ToArray());
         Assert.DoesNotContain(Plugin.ReferenceCallers(target => target.Type.StartsWith("Glamourer.", StringComparison.Ordinal) &&
             (target.Type.Contains("Base64", StringComparison.Ordinal) || target.Type.Contains("Design", StringComparison.Ordinal))), InHv3Adapter);
     }
+
+    private const string Hv4RunType = "RSyncStageCraft.HumanActorCustomizePlusRun";
+    private const string Hv4CustomizePlusType = "RSyncStageCraft.Adapters.HumanActorCustomizePlusIpc";
+    private const string Hv4StageType = HumanPuppetNamespace + "HumanActorCustomizePlusStage";
+
+    /// <summary>HV-4's Customize+ labels beyond T3-1's reads: Debug only.</summary>
+    private static readonly string[] Hv4CustomizePlusLabels =
+    [
+        "CustomizePlus.Profile.SetTemporaryProfileOnCharacter", "CustomizePlus.Profile.DeleteTemporaryProfileByUniqueId",
+    ];
+
+    [Fact]
+    public void TheHv4RunnerItsCommandAndItsCustomizePlusAdapterExistOnlyInDebug()
+    {
+        // HV-4: positive absence in Release, and in Debug one composition
+        // site: the connection constructs the runner, and only the runner
+        // constructs the Customize+ adapter and stage.
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        Assert.Equal(Debug, client.GetType(Hv4StageType) is not null);
+        Assert.Equal(Debug, client.GetType(HumanPuppetNamespace + "IHumanActorCustomizePlus") is not null);
+        Assert.Equal(Debug, Plugin.HasType(Hv4RunType));
+        Assert.Equal(Debug, Plugin.HasType(Hv4CustomizePlusType));
+        Assert.Equal(Debug, Plugin.UserStrings.Contains("/rschv4"));
+        foreach (var label in Hv4CustomizePlusLabels)
+            Assert.Equal(Debug, Plugin.UserStrings.Contains(label));
+        if (!DebugBuild())
+            return;
+        Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
+            Plugin.Callers(target => target.Type == Hv4RunType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor") },
+            Plugin.Callers(target => target.Type == Hv4CustomizePlusType && target.Name == ".ctor").ToArray());
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == Hv4StageType && target.Name == ".ctor").ToArray());
+    }
+
+    [Theory]
+    [InlineData("CustomizePlus.Profile.DeleteTemporaryProfileOnCharacter")]
+    [InlineData("CustomizePlus.Profile.AddPlayerCharacter")]
+    [InlineData("CustomizePlus.Profile.RemovePlayerCharacter")]
+    [InlineData("CustomizePlus.Profile.EnableByUniqueId")]
+    [InlineData("CustomizePlus.Profile.DisableByUniqueId")]
+    [InlineData("CustomizePlus.Profile.SetPriorityByUniqueId")]
+    [InlineData("CustomizePlus.Profile.EnableTemplateByUniqueId")]
+    [InlineData("CustomizePlus.Profile.DisableTemplateByUniqueId")]
+    [InlineData("CustomizePlus.Profile.OnUpdate")]
+    public void NoBuildHoldsACustomizePlusDeletionByIndexOrPersistentProfileLabel(string label) =>
+        // Owner decision D4: no deletion by object index; and no persistent profile, character, priority or template write,
+        // and no Customize+ event, in either build.
+        Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith(label, StringComparison.Ordinal));
 
     [Theory]
     [InlineData("Debug tools")]
