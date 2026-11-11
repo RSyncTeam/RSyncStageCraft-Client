@@ -355,7 +355,7 @@ internal sealed class FakeHumanActorScene : IHumanActorBackend
     {
         if (!byAddress.TryGetValue(address, out var obj))
             return new(-1, 0, 0, -1, null, false, 0, 0, 0, false, null, true);
-        return new(obj.GlobalIndex, (ulong)obj.EntityId, obj.EntityId, obj.Kind, obj.Name, obj.Name is not null, 0, 0,
+        return new(obj.GlobalIndex, (ulong)obj.EntityId, obj.EntityId, obj.Kind, obj.Name, obj.Name is not null, obj.World, 0,
             HumanPuppetFacts.NoOwner, obj.DrawEnabled && (DrawAppears || obj == Player), obj.Customize, obj.Targetable);
     }
 
@@ -377,6 +377,7 @@ internal sealed class FakeHumanActorScene : IHumanActorBackend
         target.Customize = (byte[]?)from.Customize?.Clone();
         target.Position = from.Position;
         target.Rotation = from.Rotation;
+        target.World = from.World;
         if (CopyCopiesKind)
             target.Kind = from.Kind;
         if (CopyCopiesName)
@@ -449,6 +450,8 @@ internal sealed class FakeHumanActorScene : IHumanActorBackend
         public int Kind { get; set; }
         public uint EntityId { get; set; }
         public string? Name { get; set; }
+        /// <summary>The home world; 0 unless a test sets one (HV-4 only reads it).</summary>
+        public ushort World { get; set; }
         public byte[]? Customize { get; set; }
         public Vector3 Position { get; set; }
         public float Rotation { get; set; }

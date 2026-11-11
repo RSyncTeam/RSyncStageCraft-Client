@@ -47,6 +47,8 @@ internal sealed class PluginConnection
     private readonly HumanActorPenumbraRun? hv2;
 
     private readonly HumanActorGlamourerRun? hv3;
+    // HV-4 only: null unless a Debug build is loaded as a dev plugin.
+    private readonly HumanActorCustomizePlusRun? hv4;
 #endif
 
     internal PluginConnection(
@@ -210,7 +212,7 @@ internal sealed class PluginConnection
             {
                 t31 = new HumanPuppetT3Run(pluginInterface, commands, framework, clientState, condition, data,
                     () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
-                        (hv1?.LiveCount ?? 0) + (hv2?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0),
+                        (hv1?.LiveCount ?? 0) + (hv2?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0) + (hv4?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
                         or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
                     () => scenes.Current,
@@ -226,7 +228,7 @@ internal sealed class PluginConnection
             {
                 hv1 = new HumanActorBaselineRun(commands, framework, clientState, condition,
                     () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
-                        (t31?.OccupiedSlots ?? 0) + (hv2?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0),
+                        (t31?.OccupiedSlots ?? 0) + (hv2?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0) + (hv4?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
                         or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
                     log);
@@ -241,7 +243,7 @@ internal sealed class PluginConnection
             {
                 hv2 = new HumanActorPenumbraRun(pluginInterface, commands, framework, clientState, condition,
                     () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
-                        (t31?.OccupiedSlots ?? 0) + (hv1?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0),
+                        (t31?.OccupiedSlots ?? 0) + (hv1?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0) + (hv4?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
                         or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
                     log);
@@ -256,7 +258,7 @@ internal sealed class PluginConnection
             {
                 hv3 = new HumanActorGlamourerRun(pluginInterface, commands, framework, clientState, condition,
                     () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
-                        (t31?.OccupiedSlots ?? 0) + (hv1?.LiveCount ?? 0) + (hv2?.LiveCount ?? 0),
+                        (t31?.OccupiedSlots ?? 0) + (hv1?.LiveCount ?? 0) + (hv2?.LiveCount ?? 0) + (hv4?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
                         or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
                     log);
@@ -265,6 +267,21 @@ internal sealed class PluginConnection
             {
                 hv3 = null;
                 log($"RSC HV-3 runner not loaded ({exception.GetType().Name}).");
+            }
+            // HV-4: HV-3's human with one Customize+ temporary profile, under the same refusals.
+            try
+            {
+                hv4 = new HumanActorCustomizePlusRun(pluginInterface, commands, framework, clientState, condition,
+                    () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
+                        (t31?.OccupiedSlots ?? 0) + (hv1?.LiveCount ?? 0) + (hv2?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0),
+                    () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
+                        or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
+                    log);
+            }
+            catch (Exception exception)
+            {
+                hv4 = null;
+                log($"RSC HV-4 runner not loaded ({exception.GetType().Name}).");
             }
         }
 #endif
@@ -391,6 +408,7 @@ internal sealed class PluginConnection
         hv1?.Shutdown();
         hv2?.Shutdown();
         hv3?.Shutdown();
+        hv4?.Shutdown();
 #endif
         location.Changed -= OnLocationChanged;
         framework.Update -= OnFrameworkUpdate;
@@ -499,6 +517,14 @@ internal sealed class PluginConnection
         catch (Exception exception)
         {
             log($"RSC HV-3 tick error ({exception.GetType().Name}).");
+        }
+        try
+        {
+            hv4?.Tick();
+        }
+        catch (Exception exception)
+        {
+            log($"RSC HV-4 tick error ({exception.GetType().Name}).");
         }
 #endif
     }

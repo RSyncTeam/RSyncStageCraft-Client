@@ -131,6 +131,15 @@ public enum HumanActorPhase
 /// player's kind, have Penumbra parent −1, and be the only object with its
 /// name. Removal, a stop and unload revert it, by index, before the Penumbra
 /// release; a lost actor gets no Glamourer call.</para>
+/// <para>HV-4 adds one optional stage after HV-3's,
+/// <see cref="HumanActorCustomizePlusStage"/>, used only together with it:
+/// without it the sequence is HV-3's exactly. With it, the actor's own
+/// Customize+ parent entry is set to −1 and read back just before HV-3's early
+/// probe; on the update after HV-3's readback one temporary profile is applied.
+/// Before the Customize+ apply the HV-3 checks hold, and the
+/// Customize+ parent reads −1, the home world is a real one and the name is
+/// not the player's. Removal, a stop, a loss of ownership and unload delete it
+/// by its receipt first, before the Glamourer revert.</para>
 /// </summary>
 public sealed class HumanActorBaseline
 {
@@ -157,6 +166,7 @@ public sealed class HumanActorBaseline
 
     private const int PlayerKind = 1;
     private const string GlamourerPrefix = "glamourer: ";
+    private const string CustomizePlusPrefix = "customize+: ";
     private const int NameAttempts = 8;
     private const float PlacementTolerance = 0.01f;
 
@@ -165,6 +175,7 @@ public sealed class HumanActorBaseline
     private readonly Action<string> log;
     private readonly HumanActorPenumbraStage? penumbra;
     private readonly HumanActorGlamourerStage? glamourer;
+    private readonly HumanActorCustomizePlusStage? customizePlus;
     private readonly string prefix;
     private Actor? actor;
 
@@ -184,7 +195,18 @@ public sealed class HumanActorBaseline
     public HumanActorBaseline(
         IHumanActorBackend backend, Func<string?> sceneExit, Action<string> log, HumanActorPenumbraStage? penumbra,
         HumanActorGlamourerStage? glamourer, string prefix)
+        : this(backend, sceneExit, log, penumbra, glamourer, null, prefix)
     {
+    }
+
+    /// <summary>HV-4: HV-3's sequence with the Customize+ stage after it (which needs the Glamourer stage).</summary>
+    public HumanActorBaseline(
+        IHumanActorBackend backend, Func<string?> sceneExit, Action<string> log, HumanActorPenumbraStage? penumbra,
+        HumanActorGlamourerStage? glamourer, HumanActorCustomizePlusStage? customizePlus, string prefix)
+    {
+        if (customizePlus is not null && glamourer is null)
+            throw new ArgumentException("the Customize+ stage needs the Glamourer stage", nameof(customizePlus));
+        this.customizePlus = customizePlus;
         if (glamourer is not null && penumbra is null)
             throw new ArgumentException("the Glamourer stage needs the Penumbra stage", nameof(glamourer));
         this.glamourer = glamourer;
@@ -345,10 +367,15 @@ public sealed class HumanActorBaseline
                             break;
                         }
                         var probe = glamourer is null ? null
-                            : new Func<string?>(() => glamourer.EarlyProbe(current.GlobalIndex, GlamourerChecks(current)));
+                            : customizePlus is null
+                                ? new Func<string?>(() => glamourer.EarlyProbe(current.GlobalIndex, GlamourerChecks(current)))
+                                : new Func<string?>(() => customizePlus.Detach(current.GlobalIndex, GlamourerChecks(current)) ??
+                                    glamourer.EarlyProbe(current.GlobalIndex, GlamourerChecks(current)));
                         if (penumbra.Apply(current.GlobalIndex, player, probe) is { } refused)
                         {
-                            if (refused.StartsWith(GlamourerPrefix, StringComparison.Ordinal))
+                            if (refused.StartsWith(CustomizePlusPrefix, StringComparison.Ordinal))
+                                Halt("customize+", refused[CustomizePlusPrefix.Length..], current);
+                            else if (refused.StartsWith(GlamourerPrefix, StringComparison.Ordinal))
                                 Halt("glamourer", refused[GlamourerPrefix.Length..], current);
                             else
                                 Halt("penumbra", refused, current);
@@ -433,6 +460,14 @@ public sealed class HumanActorBaseline
                         Halt("glamourer", refusedApply.StartsWith(GlamourerPrefix, StringComparison.Ordinal)
                             ? refusedApply[GlamourerPrefix.Length..] : refusedApply, current);
                 }
+                // HV-4: once, on the update after HV-3's state was applied and read back.
+                else if (customizePlus is not null && !current.CustomizePlusTried && glamourer?.State == HumanGlamourerState.Applied)
+                {
+                    current.CustomizePlusTried = true;
+                    if (customizePlus.Apply(current.GlobalIndex, CustomizePlusChecks(current)) is { } refusedProfile)
+                        Halt("customize+", refusedProfile.StartsWith(CustomizePlusPrefix, StringComparison.Ordinal)
+                            ? refusedProfile[CustomizePlusPrefix.Length..] : refusedProfile, current);
+                }
                 break;
         }
     }
@@ -472,7 +507,7 @@ public sealed class HumanActorBaseline
 
     public string Status() => prefix + $"status: {Phase}, stop {(Stop is null ? "none" : "latched")}, residue {Residue}" +
         (penumbra is null ? "." : $", temporary collection {(penumbra.Holding ? "held" : "none")}, collection residue {penumbra.Residue}" +
-            (glamourer is null ? "." : $", {glamourer.Status()}."));
+            (glamourer is null ? "." : $", {glamourer.Status()}" + (customizePlus is null ? "." : $", {customizePlus.Status()}.")));
 
     /// <summary>Two yalms along the player's facing, turned to face the player.</summary>
     public static HumanActorPlacement InFrontOf(HumanActorPlacement player)
@@ -537,6 +572,28 @@ public sealed class HumanActorBaseline
         return null;
     }
 
+    /// <summary>
+    /// HV-4, read-only, immediately before the Customize+ apply: HV-3's checks,
+    /// then the actor's own Customize+ parent reads −1 (Customize+ keeps its own
+    /// copy-parent table), its home world is neither 0 nor AnyWorld (65535,
+    /// which matches every world), and its name is not the player's. Null when
+    /// all hold.
+    /// </summary>
+    private string? CustomizePlusChecks(Actor owned)
+    {
+        if (GlamourerChecks(owned) is { } failed)
+            return failed;
+        if (customizePlus is null || !customizePlus.ParentDetached(owned.GlobalIndex))
+            return "the actor's Customize+ parent does not read -1";
+        var facts = backend.ReadFacts(owned.Address);
+        if (facts.HomeWorld is 0 or ushort.MaxValue)
+            return "the actor's home world is not a real world";
+        var player = backend.ReadFacts(backend.LocalPlayer);
+        if (player.Name is null || string.Equals(player.Name, owned.Name, StringComparison.OrdinalIgnoreCase))
+            return "the actor's name cannot be told apart from the player's";
+        return null;
+    }
+
     /// <summary>Checks 1–5, read-only: null while the object is still exactly this actor.</summary>
     private string? OwnershipMismatch(Actor owned)
     {
@@ -562,6 +619,8 @@ public sealed class HumanActorBaseline
     private bool Delete(Actor owned)
     {
         backend.SetAlpha(owned.Address, 0f);
+        // HV-4: the Customize+ profile goes first, by its receipt: last applied, first removed.
+        RemoveCustomizePlus();
         // HV-3: the Glamourer state is reverted while the actor still exists, before the Penumbra release.
         if (glamourer?.Revert(owned.GlobalIndex, GlamourerChecks(owned)) is { } glamourerProblem)
             Stop ??= glamourerProblem;
@@ -590,6 +649,7 @@ public sealed class HumanActorBaseline
             {
                 actor = null;
                 Residue++;
+                RemoveCustomizePlus();
                 glamourer?.Abandon(lost);
                 ReleasePenumbra(-1);
                 deleted = "not deleted: " + lost;
@@ -609,12 +669,21 @@ public sealed class HumanActorBaseline
         actor = null;
         Residue++;
         Stop ??= "ownership: " + why;
+        // HV-4: the receipt names RSC's profile, not the object, so it is still deleted by it.
+        RemoveCustomizePlus();
         // HV-3: no Glamourer call: the index may now hold another object.
         glamourer?.Abandon(why);
         // The collection is RSC's by its id whatever became of the object; the object itself is not read.
         ReleasePenumbra(-1);
         log(prefix + $"STOP: the actor is no longer provably RSC's ({why}); it is not touched again.");
         return false;
+    }
+
+    /// <summary>HV-4: the stage's deletion by receipt; a problem latches a stop (the cleanup goes on).</summary>
+    private void RemoveCustomizePlus()
+    {
+        if (customizePlus?.Remove() is { } problem)
+            Stop ??= problem;
     }
 
     /// <summary>HV-2: the stage's release; a problem latches a stop (the actor is still deleted).</summary>
@@ -652,6 +721,7 @@ public sealed class HumanActorBaseline
         public int RebuildUpdate { get; set; }
         public int RebuiltUpdate { get; set; } = -1;
         public bool GlamourerTried { get; set; }
+        public bool CustomizePlusTried { get; set; }
     }
 }
 #endif
