@@ -56,6 +56,7 @@ public sealed class Plugin : IDalamudPlugin
                 ObjectTable,
 #if RSC_DEVELOPMENT
                 CommandManager,
+                PlayerState,
 #endif
                 message => Log.Information(message));
             Connection = connection;

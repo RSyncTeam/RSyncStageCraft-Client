@@ -47,6 +47,9 @@ public sealed class HumanActorBaselineTests
         Assert.True(IndexOf("copy 200<-200") < IndexOf("place 200"));
         Assert.True(IndexOf("place 200") < IndexOf("untargetable 200"));
         Assert.DoesNotContain(scene.Calls, call => call.StartsWith("draw on", StringComparison.Ordinal));
+        // r1c: HV-1 writes no home world; the actor keeps what creation and the copies left.
+        Assert.DoesNotContain(scene.Calls, call => call.StartsWith("world ", StringComparison.Ordinal));
+        Assert.Equal(scene.CreatedWorld, actor.World);
         // The kind is the copies' own result: the player's kind, never written.
         Assert.Equal(1, actor.Kind);
         Assert.False(actor.Targetable);
@@ -293,6 +296,17 @@ internal sealed class FakeHumanActorScene : IHumanActorBackend
     public bool CopyCopiesKind { get; set; } = true;
     public bool CopyCopiesName { get; set; }
     public bool NameWriteFails { get; set; }
+    /// <summary>
+    /// The home world a created object starts with. The copies never change it:
+    /// with RSC's flags (the position flag, then none) the real copies did not
+    /// carry the player's world, or HV-4's guard would have passed. 65535 is
+    /// the value inferred, not observed.
+    /// </summary>
+    public ushort CreatedWorld { get; set; } = ushort.MaxValue;
+    /// <summary>HV-4: the home world write is logged but not applied.</summary>
+    public bool WorldWriteIgnored { get; set; }
+    /// <summary>HV-4: runs inside the home world write, before it lands.</summary>
+    public Action? DuringWorldWrite { get; set; }
     public bool DrawAppears { get; set; } = true;
     /// <summary>Ready-to-draw reads before the first true one.</summary>
     public int ReadyAfter { get; set; }
@@ -336,7 +350,7 @@ internal sealed class FakeHumanActorScene : IHumanActorBackend
             return reported;
         var comIndex = Array.IndexOf(com, 0);
         var globalIndex = NextGlobalIndex >= 0 ? NextGlobalIndex : ActorSlotRange.MinimumGlobalIndex + comIndex;
-        Add(globalIndex, comIndex, kind: 2);
+        Add(globalIndex, comIndex, kind: 2).World = CreatedWorld;
         return comIndex;
     }
 
@@ -367,6 +381,15 @@ internal sealed class FakeHumanActorScene : IHumanActorBackend
             obj.Name = name;
     }
 
+    public void WriteHomeWorld(nint actor, ushort homeWorld)
+    {
+        var obj = byAddress[actor];
+        Calls.Add($"world {obj.GlobalIndex} {homeWorld}");
+        DuringWorldWrite?.Invoke();
+        if (!WorldWriteIgnored)
+            obj.World = homeWorld;
+    }
+
     public void CopyCharacter(nint actor, nint source)
     {
         var target = byAddress[actor];
@@ -377,7 +400,7 @@ internal sealed class FakeHumanActorScene : IHumanActorBackend
         target.Customize = (byte[]?)from.Customize?.Clone();
         target.Position = from.Position;
         target.Rotation = from.Rotation;
-        target.World = from.World;
+        // r1c: no world copy. The fake used to copy the player's world, which the real copies do not do.
         if (CopyCopiesKind)
             target.Kind = from.Kind;
         if (CopyCopiesName)
@@ -450,7 +473,7 @@ internal sealed class FakeHumanActorScene : IHumanActorBackend
         public int Kind { get; set; }
         public uint EntityId { get; set; }
         public string? Name { get; set; }
-        /// <summary>The home world; 0 unless a test sets one (HV-4 only reads it).</summary>
+        /// <summary>The home world: <see cref="CreatedWorld"/> for a created object, 0 for others unless a test sets one.</summary>
         public ushort World { get; set; }
         public byte[]? Customize { get; set; }
         public Vector3 Position { get; set; }

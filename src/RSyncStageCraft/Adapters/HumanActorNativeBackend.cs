@@ -171,6 +171,15 @@ internal sealed unsafe class HumanActorNativeBackend : IHumanActorBackend
             gameObject->SetName(name);
     }
 
+    public void WriteHomeWorld(nint actor, ushort homeWorld)
+    {
+        // HV-4 only, on RSC's own proven actor: this one field. A non-character is not written, so the read-back stops.
+        var gameObject = (GameObjectStruct*)actor;
+        if (gameObject == null || !gameObject->IsCharacter())
+            return;
+        ((GameCharacter*)gameObject)->HomeWorld = homeWorld;
+    }
+
     public void CopyCharacter(nint actor, nint source)
     {
         var target = (GameCharacter*)actor;

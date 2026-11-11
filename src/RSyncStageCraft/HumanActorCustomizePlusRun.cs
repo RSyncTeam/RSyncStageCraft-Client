@@ -15,9 +15,13 @@ namespace RSyncStageCraft;
 /// its IPC adapter, and nothing else. It exists only in a Debug build (RSC_DEVELOPMENT) loaded as a dev
 /// plugin, and its only trigger is one command, typed in the Dalamud log
 /// window's console. Each step runs on the next framework update. Its records
-/// go to the Dalamud log with no name, address, path, world, key or full
-/// receipt. No server call is made. Its only subscription is Dalamud's
-/// plugin-list change, which only moves a counter: no RSC step can run inside
+/// go to the Dalamud log with no name, address, path, key or full receipt,
+/// and no world number other than W-3's and, for the value the copies left,
+/// 0 or 65535 (any real world is logged only as "the player's world" or
+/// "another world"). W-3's row and the player's
+/// current world are read, never written, through
+/// <see cref="HumanActorWorldData"/>. No server call is made. Its only
+/// subscription is Dalamud's plugin-list change, which only moves a counter: no RSC step can run inside
 /// another plugin's call.
 /// </summary>
 internal sealed class HumanActorCustomizePlusRun
@@ -54,6 +58,8 @@ internal sealed class HumanActorCustomizePlusRun
         IFramework framework,
         IClientState clientState,
         ICondition condition,
+        IDataManager data,
+        IPlayerState playerState,
         Func<int> otherRscActors,
         Func<bool> serverSessionPossible,
         Action<string> log)
@@ -62,6 +68,8 @@ internal sealed class HumanActorCustomizePlusRun
         this.framework = framework ?? throw new ArgumentNullException(nameof(framework));
         this.clientState = clientState ?? throw new ArgumentNullException(nameof(clientState));
         this.condition = condition ?? throw new ArgumentNullException(nameof(condition));
+        ArgumentNullException.ThrowIfNull(data);
+        ArgumentNullException.ThrowIfNull(playerState);
         this.otherRscActors = otherRscActors ?? throw new ArgumentNullException(nameof(otherRscActors));
         this.serverSessionPossible = serverSessionPossible ?? throw new ArgumentNullException(nameof(serverSessionPossible));
         this.log = log ?? throw new ArgumentNullException(nameof(log));
@@ -72,7 +80,7 @@ internal sealed class HumanActorCustomizePlusRun
         baseline = new HumanActorBaseline(backend, SceneExit, log,
             new HumanActorPenumbraStage(penumbra, log, LogPrefix) { ReleaseByDeletion = true },
             new HumanActorGlamourerStage(glamourer, log, LogPrefix),
-            new HumanActorCustomizePlusStage(customizePlus, log, LogPrefix), LogPrefix);
+            new HumanActorCustomizePlusStage(customizePlus, log, LogPrefix), new HumanActorWorldData(data, playerState), LogPrefix);
         commandAdded = commands.AddHandler(Command, new CommandInfo(OnCommand)
         {
             HelpMessage = "HV-4 step, from the Dalamud log window's console only.",

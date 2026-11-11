@@ -564,6 +564,37 @@ public sealed class ReleaseDebugSeparationTests
             Plugin.ReferenceCallers(target => target.Type == Hv4StageType && target.Name == ".ctor").ToArray());
     }
 
+    private const string Hv4WorldDataType = "RSyncStageCraft.Adapters.HumanActorWorldData";
+
+    [Fact]
+    public void TheHomeWorldWriteAndW3sReadsExistOnlyInDebugAndOnlyTheSpawnWrites()
+    {
+        // HV-4 r1c: positive absence in Release. In Debug, only the baseline's
+        // spawn calls the home world write, no plugin method calls it, only the
+        // native adapter implements it, and only the HV-4 runner constructs the
+        // World reads. That the spawn writes only in the HV-4 composition is a
+        // runtime branch, proved by the synthetic tests, not here.
+        const string backend = HumanPuppetNamespace + "IHumanActorBackend";
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        Assert.Equal(Debug, client.GetType(backend)?.GetMethod("WriteHomeWorld") is not null);
+        Assert.Equal(Debug, client.GetType(HumanPuppetNamespace + "HumanActorW3") is not null);
+        Assert.Equal(Debug, client.GetType(HumanPuppetNamespace + "IHumanActorWorldSource") is not null);
+        Assert.Equal(Debug, Plugin.HasMethod(Hv1NativeType, "WriteHomeWorld"));
+        Assert.Equal(Debug, Plugin.HasType(Hv4WorldDataType));
+        Assert.Empty(Plugin.ReferenceCallers(target => target.Name == "WriteHomeWorld"));
+        if (!DebugBuild())
+        {
+            Assert.Empty(Client.Callers(target => target.Name == "WriteHomeWorld"));
+            return;
+        }
+        // The write sits in a lambda inside the spawn: the caller is the spawn's compiler-generated method.
+        var writer = Assert.Single(Client.Callers(target => target.Name == "WriteHomeWorld"));
+        Assert.StartsWith(Hv1BaselineType, writer.Type, StringComparison.Ordinal);
+        Assert.StartsWith("<Spawn>", writer.Name, StringComparison.Ordinal);
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor") },
+            Plugin.Callers(target => target.Type == Hv4WorldDataType && target.Name == ".ctor").ToArray());
+    }
+
     [Theory]
     [InlineData("CustomizePlus.Profile.DeleteTemporaryProfileOnCharacter")]
     [InlineData("CustomizePlus.Profile.AddPlayerCharacter")]
