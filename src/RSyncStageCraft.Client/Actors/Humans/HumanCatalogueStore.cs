@@ -239,6 +239,80 @@ public sealed class HumanCatalogueStore
         }
     }
 
+    /// <summary>
+    /// HV-5 M2: the one entry with <paramref name="label"/> (ignoring case),
+    /// read and checked as <see cref="List"/> reads it, or null with the
+    /// reason. Read only: nothing in the store is written, renamed or deleted.
+    /// </summary>
+    public HumanCatalogueEntry? FindEntry(string label, out string? refusal)
+    {
+        ArgumentNullException.ThrowIfNull(label);
+        var (found, unreadable) = ReadEntries();
+        var matches = found.Where(entry => HumanCatalogueLabel.Same(entry.Label, label)).ToList();
+        refusal = matches.Count switch
+        {
+            1 => null,
+            0 when unreadable > 0 => $"no readable entry has that label ({unreadable} entry file(s) could not be read)",
+            0 => "no entry has that label",
+            _ => "more than one entry has that label",
+        };
+        return refusal is null ? matches[0] : null;
+    }
+
+    /// <summary>
+    /// HV-5 M2: one held lease on a stored file. The file is opened once,
+    /// for reading, sharing only reading (so nothing can write, replace or
+    /// delete it while held), re-hashed in full through that handle, and kept
+    /// open. A missing, linked, resized or damaged file is reported, never
+    /// replaced or deleted.
+    /// </summary>
+    public async Task<(HumanCatalogueHold? Hold, string? Problem)> HoldAsync(HumanCatalogueBlob blob, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(blob);
+        if (!ContentHash.TryParse(blob.Hash, out var hash))
+            return (null, "has no valid hash");
+        var file = BlobFile(hash);
+        FileStream stream;
+        try
+        {
+            if (!File.Exists(file))
+                return (null, "is missing");
+            if (IsLink(file))
+                return (null, "is a link");
+            stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, BufferBytes, FileOptions.SequentialScan);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return (null, "could not be opened");
+        }
+        var kept = false;
+        var buffer = ArrayPool<byte>.Shared.Rent(BufferBytes);
+        try
+        {
+            if (stream.Length != blob.Size)
+                return (null, "has the wrong size");
+            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            int read;
+            while ((read = await stream.ReadAsync(buffer.AsMemory(0, BufferBytes), cancellationToken).ConfigureAwait(false)) > 0)
+                sha.AppendData(buffer, 0, read);
+            if (!string.Equals(Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant(), hash.Value, StringComparison.Ordinal))
+                return (null, "does not verify");
+            stream.Position = 0;
+            kept = true;
+            return (new HumanCatalogueHold(hash.Value, blob.Size, file, stream), null);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return (null, "could not be read");
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+            if (!kept)
+                await stream.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
     /// <summary>True if an entry already uses <paramref name="label"/> (ignoring case).</summary>
     public bool HasLabel(string label) => ReadEntries().Entries.Any(entry => HumanCatalogueLabel.Same(entry.Label, label));
 

@@ -16,7 +16,7 @@ namespace RSyncStageCraft.Adapters;
 /// HV-3 only (Debug build, dev plugin): Glamourer through the pinned
 /// Glamourer.Api 2.8.2 subscribers, by object index only. Bound:
 /// <c>ApiVersion.V2</c>, <c>UnlockState</c>, <c>ApplyState</c>,
-/// <c>GetState</c>, <c>RevertState</c> and <c>CanUnlock</c>. Nothing here
+/// <c>GetState</c> (also as JSON text, for HV-5's readback), <c>RevertState</c> and <c>CanUnlock</c>. Nothing here
 /// calls a by-name variant, <c>DeletePlayerState</c>, <c>UnlockAll</c>,
 /// <c>ReapplyState</c>, <c>RevertToAutomation</c> or a design call, and
 /// nothing subscribes to a Glamourer event. Installed versions come from
@@ -95,9 +95,17 @@ internal sealed class HumanActorGlamourerIpc : IHumanActorGlamourer
     /// through the same by-index <c>GetState</c> subscriber. Read only;
     /// nothing is decoded here. Null unless Glamourer answers Success.
     /// </summary>
-    internal (int Code, string? Json) StateJson(int objectIndex)
+    internal (int Code, string? Json) StateJson(int objectIndex) => GetStateJson(objectIndex, 0);
+
+    /// <summary>
+    /// HV-5 M2: the whole state of <paramref name="objectIndex"/> under
+    /// <paramref name="key"/> as compact JSON text, the same way
+    /// <see cref="StateJson"/> reads the stored reference, for the readback.
+    /// Read only. Null unless Glamourer answers Success.
+    /// </summary>
+    public (int Code, string? Json) GetStateJson(int objectIndex, uint key)
     {
-        var (code, state) = getState.Invoke(objectIndex, 0);
+        var (code, state) = getState.Invoke(objectIndex, key);
         return ((int)code, code == GlamourerApiEc.Success ? state?.ToString(Newtonsoft.Json.Formatting.None) : null);
     }
 
