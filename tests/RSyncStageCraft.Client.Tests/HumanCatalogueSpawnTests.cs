@@ -483,9 +483,9 @@ public sealed class HumanCatalogueSpawnTests : IDisposable
     // ---- The holds, tied to the cleanup (amendment 1 §3) ----
 
     private (HumanCatalogueSpawnSession Session, HumanCatalogueHoldSet Holds, HumanCatalogueSpawnReady Ready, List<string> Journal) Session(
-        IHumanActorBackend? backend = null)
+        IHumanActorBackend? backend = null, IReadOnlyList<string>? summary = null)
     {
-        var fixture = HumanCatalogueFixture.Create();
+        var fixture = HumanCatalogueFixture.Create(summary: summary);
         folders.Add(fixture.Folder);
         var store = new HumanCatalogueStore(fixture.Root);
         var (ready, refusal) = HumanCatalogueSpawnPreparation.PrepareAsync(HumanCatalogueFixture.Label, false, store, fixture.Current(), default)
@@ -539,6 +539,70 @@ public sealed class HumanCatalogueSpawnTests : IDisposable
         var removed = lines.FindIndex(line => line.StartsWith(Prefix + "removed: deleted", StringComparison.Ordinal));
         var released = lines.IndexOf(Prefix + $"holds released last: {ready.Holds.Count} file(s), after the actor's deletion and the collection's removal were confirmed.");
         Assert.True(removed >= 0 && released > removed);
+    }
+
+    /// <summary>r4: the plan's skeleton checks as the plugin wires them, against a synthetic actor summary.</summary>
+    private void CompareWith(HumanCatalogueSpawnReady ready, Func<IReadOnlyList<string>> actor)
+    {
+        baseSkeleton = _ => HumanCatalogueSkeletonSummary.BaseMismatch(ready.Entry.SkeletonSummary, actor());
+        skeleton = _ => HumanCatalogueSkeletonSummary.Mismatch(ready.Entry.SkeletonSummary, actor());
+    }
+
+    [Fact]
+    public void AnEntryWithAnEmptyNonBaseSlotSpawnsConfirmsBothPhasesShowsLastAndReleasesTheHoldsLast()
+    {
+        var (spawn, holds, ready, journal) = Session(summary: HumanCatalogueFixture.FiveSlotSummary);
+        Assert.Equal(HumanCatalogueFixture.FiveSlotSummary, ready.Entry.SkeletonSummary);
+        CompareWith(ready, () => HumanCatalogueFixture.FiveSlotSummary);
+        var baseline = BaselineOf(spawn);
+        Assert.True(spawn.Start(ready, Plan()));
+        Tick(baseline, spawn, 100);
+        Assert.Null(baseline.Stop);
+        Assert.Equal(HumanActorPhase.Visible, baseline.Phase);
+        Assert.Equal(1, Shows());
+        var phaseOne = lines.FindIndex(line => line.StartsWith(Prefix + "Penumbra phase 1 confirmed: ", StringComparison.Ordinal));
+        var skeletonLine = lines.IndexOf(Prefix + "phase 1: the actor's base skeleton equals the entry's; the rest of the look is checked after " +
+            "Glamourer; still alpha 0; Glamourer next.");
+        var phaseTwo = lines.FindIndex(line => line.StartsWith(Prefix + "Penumbra phase 2 confirmed: ", StringComparison.Ordinal));
+        var shown = lines.FindIndex(line => line.StartsWith(Prefix + "visible: shown last", StringComparison.Ordinal));
+        Assert.True(phaseOne >= 0 && phaseOne < skeletonLine && skeletonLine < phaseTwo && phaseTwo < shown, string.Join(" | ", lines));
+        Assert.True(IndexOf("glamourer apply 200") < IndexOf("alpha 200 1"));
+        Assert.Equal(ready.Holds.Count, holds.Active);
+
+        Assert.True(baseline.Remove());
+        spawn.Settle();
+        Assert.Equal(0, holds.Active);
+        Assert.Equal(0, holds.Retained);
+        Assert.All(ready.Holds, hold => Assert.False(hold.Stream.CanRead));
+        Assert.Empty(journal);
+        var removed = lines.FindIndex(line => line.StartsWith(Prefix + "removed: deleted", StringComparison.Ordinal));
+        var released = lines.IndexOf(Prefix + $"holds released last: {ready.Holds.Count} file(s), after the actor's deletion and the collection's removal were confirmed.");
+        Assert.True(removed >= 0 && released > removed);
+    }
+
+    [Theory]
+    [InlineData("the actor has a resource in the entry's empty slot")]
+    [InlineData("the actor's slot is empty where the entry has one")]
+    public void AnEmptySlotOnOneSideOnlyHaltsTheActorHiddenAndRevertedAndReleasesTheHolds(string how)
+    {
+        const string filled = "skeleton 4: bones 9, names 00000000000000a4, parents 00000000000000b4, reference pose 00000000000000c4";
+        IReadOnlyList<string> withFour = [.. HumanCatalogueFixture.FiveSlotSummary.Take(5), filled];
+        var actorHasFour = how.StartsWith("the actor has", StringComparison.Ordinal);
+        var (spawn, holds, ready, journal) = Session(summary: actorHasFour ? HumanCatalogueFixture.FiveSlotSummary : withFour);
+        CompareWith(ready, () => actorHasFour ? withFour : HumanCatalogueFixture.FiveSlotSummary);
+        var baseline = BaselineOf(spawn);
+        Assert.True(spawn.Start(ready, Plan()));
+        Tick(baseline, spawn, 600);
+        Assert.NotNull(baseline.Stop);
+        Assert.StartsWith("skeleton: the actor's skeleton summary differs from the entry's (", baseline.Stop, StringComparison.Ordinal);
+        Assert.Contains("partial 3 same; partial 4 differs", baseline.Stop, StringComparison.Ordinal);
+        Assert.Single(glamourer.Log, entry => entry.Call == "apply");
+        Assert.Contains("glamourer revert 200", scene.Calls);
+        Assert.Equal(0, Shows());
+        Assert.False(scene.Exists(200));
+        Assert.Equal(0, holds.Active);
+        Assert.Equal(0, holds.Retained);
+        Assert.Empty(journal);
     }
 
     [Fact]

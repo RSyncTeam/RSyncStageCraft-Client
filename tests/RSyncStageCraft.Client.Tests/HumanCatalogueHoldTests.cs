@@ -33,9 +33,9 @@ public sealed class HumanCatalogueHoldTests : IDisposable
         }
     }
 
-    private HumanCatalogueFixture Fixture(string? customizePlus = HumanCatalogueFixture.CustomizePlusVersion)
+    private HumanCatalogueFixture Fixture(string? customizePlus = HumanCatalogueFixture.CustomizePlusVersion, IReadOnlyList<string>? summary = null)
     {
-        var fixture = HumanCatalogueFixture.Create(customizePlus);
+        var fixture = HumanCatalogueFixture.Create(customizePlus, summary: summary);
         folders.Add(fixture.Folder);
         return fixture;
     }
@@ -179,6 +179,137 @@ public sealed class HumanCatalogueHoldTests : IDisposable
         Assert.StartsWith("the actor's skeleton summary differs from the entry's (", why, StringComparison.Ordinal);
         Assert.DoesNotContain("0a", why, StringComparison.Ordinal);
         Assert.DoesNotContain("0d", why, StringComparison.Ordinal);
+    }
+
+    // ---------- r4: a partial slot the game left empty ----------
+
+    private static readonly string[] FiveSlots = [.. HumanCatalogueFixture.FiveSlotSummary];
+
+    /// <summary>The five-slot summary with line <paramref name="index"/> (0 is the count line) replaced, or removed when null.</summary>
+    private static string[] FiveSlotsWith(int index, string? line) =>
+        line is null ? FiveSlots.Where((_, at) => at != index).ToArray() : FiveSlots.Select((old, at) => at == index ? line : old).ToArray();
+
+    public static TheoryData<string, string[]> ComparableWithEmptySlots => new()
+    {
+        { "the observed five slots, slot 4 empty", FiveSlots },
+        {
+            "three slots, slot 1 empty",
+            ["skeleton partials: 3", "skeleton 0: bones 100, names 0a, parents 0b, reference pose 0c", "skeleton 1: no resource",
+                "skeleton 2: bones 12, names 2a, parents 2b, reference pose 2c"]
+        },
+        { "five slots, slots 2 and 4 empty", FiveSlotsWith(3, "skeleton 2: no resource") },
+        { "a bone count alone", ["skeleton partials: 2", "skeleton 0: bones 100", "skeleton 1: no resource"] },
+    };
+
+    [Theory]
+    [MemberData(nameof(ComparableWithEmptySlots))]
+    public void AnEmptyNonBaseSlotIsComparable(string shape, string[] summary)
+    {
+        Assert.True(HumanCatalogueSkeletonSummary.Comparable(summary), shape);
+    }
+
+    public static TheoryData<string, string[]> NotComparable => new()
+    {
+        { "no lines", [] },
+        { "a count of zero", ["skeleton partials: 0"] },
+        { "the count alone", ["skeleton partials: 5"] },
+        { "the base slot empty", FiveSlotsWith(1, "skeleton 0: no resource") },
+        { "a missing slot", FiveSlotsWith(4, null) },
+        { "a missing last slot", FiveSlotsWith(5, null) },
+        { "a repeated slot", FiveSlotsWith(5, "skeleton 3: bones 2, names 00000000000000a3, parents 00000000000000b3, reference pose 00000000000000c3") },
+        { "slots out of order", [FiveSlots[0], FiveSlots[1], FiveSlots[2], FiveSlots[4], FiveSlots[3], FiveSlots[5]] },
+        { "an extra slot", [.. FiveSlots, "skeleton 5: no resource"] },
+        { "the count not first", [.. FiveSlots[1..], FiveSlots[0]] },
+        { "a second count", [.. FiveSlots, "skeleton partials: 5"] },
+        { "a count with a leading zero", FiveSlotsWith(0, "skeleton partials: 05") },
+        { "a count with a sign", FiveSlotsWith(0, "skeleton partials: +5") },
+        { "a count with a trailing space", FiveSlotsWith(0, "skeleton partials: 5 ") },
+        { "no human draw object", ["skeleton: no human draw object"] },
+        { "no skeleton", ["skeleton: none"] },
+        { "unreadable after four slots", [.. FiveSlots[..5], "skeleton: unreadable (InvalidOperationException)"] },
+        { "unreadable after every slot", [.. FiveSlots, "skeleton: unreadable (InvalidOperationException)"] },
+        { "an empty slot spelled otherwise", FiveSlotsWith(5, "skeleton 4: no resources") },
+        { "an empty slot with a trailing space", FiveSlotsWith(5, "skeleton 4: no resource ") },
+        { "an empty slot in another case", FiveSlotsWith(5, "skeleton 4: No resource") },
+        { "a bone count missing", FiveSlotsWith(2, "skeleton 1: bones , names 00000000000000a1") },
+        { "a bone count run into the next field", FiveSlotsWith(2, "skeleton 1: bones 80names 00000000000000a1") },
+        { "a file hash left in", FiveSlotsWith(2, "skeleton 1: file 0123456789abcdef, bones 80, names 00000000000000a1") },
+        { "an empty value", FiveSlotsWith(5, "skeleton 4: ") },
+    };
+
+    [Theory]
+    [MemberData(nameof(NotComparable))]
+    public void AMissingMalformedOrUnreadableSummaryIsNotComparable(string shape, string[] summary)
+    {
+        Assert.False(HumanCatalogueSkeletonSummary.Comparable(summary), shape);
+    }
+
+    [Fact]
+    public void AnEntryWithAnEmptyNonBaseSlotIsPreparedWithItsSlotsAsStored()
+    {
+        var fixture = Fixture(summary: HumanCatalogueFixture.FiveSlotSummary);
+        var before = Snapshot(fixture.Root);
+        var (ready, refusal) = Prepare(fixture);
+        try
+        {
+            Assert.True(ready is not null, refusal);
+            Assert.Equal(HumanCatalogueFixture.FiveSlotSummary, ready!.Entry.SkeletonSummary);
+            Assert.Equal(ready.Entry.Blobs.Count, ready.Holds.Count);
+        }
+        finally
+        {
+            ready?.Abandon();
+        }
+        Assert.Equal(before, Snapshot(fixture.Root));
+    }
+
+    public static TheoryData<string, string[]> RefusedEntries => new()
+    {
+        { "the base slot empty", FiveSlotsWith(1, "skeleton 0: no resource") },
+        { "unreadable after four slots", [.. FiveSlots[..5], "skeleton: unreadable (InvalidOperationException)"] },
+    };
+
+    [Theory]
+    [MemberData(nameof(RefusedEntries))]
+    public void AnEntryWhoseSummaryIsNotComparableIsRefusedBeforeAnyHold(string shape, string[] summary)
+    {
+        var fixture = Fixture(summary: summary);
+        Assert.False(HumanCatalogueSkeletonSummary.Comparable(summary), shape);
+        var before = Snapshot(fixture.Root);
+        Refused("the entry's skeleton summary cannot be compared", Prepare(fixture));
+        Assert.Equal(before, Snapshot(fixture.Root));
+    }
+
+    [Fact]
+    public void AnEmptySlotIsNormalizedUnchangedAndComparedExactlyByItsIndex()
+    {
+        Assert.Equal("no resource", HumanCatalogueEntryCodec.WithoutFileHash("no resource"));
+        var facts = new List<KeyValuePair<string, string>> { new("actor skeleton partials", "5") };
+        for (var slot = 0; slot < 4; slot++)
+            facts.Add(new($"actor skeleton {slot}", "file 0123456789abcdef, " + FiveSlots[slot + 1][$"skeleton {slot}: ".Length..]));
+        facts.Add(new("actor skeleton 4", "no resource"));
+        var actor = HumanCatalogueSkeletonSummary.Normalize(facts, "actor");
+        Assert.Equal(HumanCatalogueFixture.FiveSlotSummary, actor);
+        Assert.Null(HumanCatalogueSkeletonSummary.Mismatch(HumanCatalogueFixture.FiveSlotSummary, actor));
+        Assert.Null(HumanCatalogueSkeletonSummary.BaseMismatch(HumanCatalogueFixture.FiveSlotSummary, actor));
+
+        // A resource on the actor where the entry's slot is empty, and the reverse: the whole summary differs at that slot only.
+        const string filled = "skeleton 4: bones 9, names 00000000000000a4, parents 00000000000000b4, reference pose 00000000000000c4";
+        string[] withFour = [.. FiveSlots[..5], filled];
+        foreach (var (stored, other) in new[] { (FiveSlots, withFour), (withFour, FiveSlots) })
+        {
+            var why = HumanCatalogueSkeletonSummary.Mismatch(stored, other);
+            Assert.StartsWith("the actor's skeleton summary differs from the entry's (", why, StringComparison.Ordinal);
+            Assert.Contains("partial 0 same; partial 1 same; partial 2 same; partial 3 same; partial 4 differs", why, StringComparison.Ordinal);
+            Assert.DoesNotContain("00000000000000a4", why, StringComparison.Ordinal);
+            Assert.Null(HumanCatalogueSkeletonSummary.BaseMismatch(stored, other));
+        }
+
+        // The same empty slot at another index is a difference: slots are compared by index, never compacted.
+        string[] emptyAtThree = [FiveSlots[0], FiveSlots[1], FiveSlots[2], FiveSlots[3], "skeleton 3: no resource",
+            "skeleton 4: bones 2, names 00000000000000a3, parents 00000000000000b3, reference pose 00000000000000c3"];
+        Assert.True(HumanCatalogueSkeletonSummary.Comparable(emptyAtThree));
+        Assert.NotNull(HumanCatalogueSkeletonSummary.Mismatch(HumanCatalogueFixture.FiveSlotSummary, emptyAtThree));
     }
 
     [Fact]
@@ -547,6 +678,21 @@ internal sealed class HumanCatalogueFixture
     public static readonly IReadOnlyList<string> Summary =
         ["skeleton partials: 1", "skeleton 0: bones 100, names 0a, parents 0b, reference pose 0c"];
 
+    /// <summary>
+    /// r4: the shape of a stored summary the M2 r3 run refused, five slots
+    /// with the last one empty, with the observed bone counts and synthetic
+    /// hashes (no catalogue content).
+    /// </summary>
+    public static readonly IReadOnlyList<string> FiveSlotSummary =
+    [
+        "skeleton partials: 5",
+        "skeleton 0: bones 168, names 00000000000000a0, parents 00000000000000b0, reference pose 00000000000000c0",
+        "skeleton 1: bones 80, names 00000000000000a1, parents 00000000000000b1, reference pose 00000000000000c1",
+        "skeleton 2: bones 5, names 00000000000000a2, parents 00000000000000b2, reference pose 00000000000000c2",
+        "skeleton 3: bones 2, names 00000000000000a3, parents 00000000000000b3, reference pose 00000000000000c3",
+        "skeleton 4: no resource",
+    ];
+
     private HumanCatalogueFixture(string folder, HumanCatalogueVersions versions)
     {
         Folder = folder;
@@ -571,7 +717,8 @@ internal sealed class HumanCatalogueFixture
 
     public const string HairSkeleton = "chara/human/c0101/skeleton/hair/h0001/skl_c0101h0001.sklb";
 
-    public static HumanCatalogueFixture Create(string? customizePlus = CustomizePlusVersion, bool deformer = true, bool hair = false)
+    public static HumanCatalogueFixture Create(string? customizePlus = CustomizePlusVersion, bool deformer = true, bool hair = false,
+        IReadOnlyList<string>? summary = null)
     {
         var fixture = new HumanCatalogueFixture(Path.Combine(Path.GetTempPath(), "rsc-hv5-spawn", Guid.NewGuid().ToString("N")),
             Versions with { CustomizePlus = customizePlus });
@@ -589,7 +736,7 @@ internal sealed class HumanCatalogueFixture
             resources.Add(new(fixture.WriteMod("Body/fx.avfx", RandomNumberGenerator.GetBytes(300)), ["vfx/common/eff/sample_a1.avfx"]));
         fixture.Resources = resources;
         var read = new HumanCatalogueRead(fixture.Mods, resources, Convert.ToBase64String(Encoding.UTF8.GetBytes("synthetic glamourer state")),
-            "{\"FileVersion\":1,\"Equipment\":{}}", "synthetic-manipulations", new AppearanceCharacterRace(1, 1, 0), 1, Summary,
+            "{\"FileVersion\":1,\"Equipment\":{}}", "synthetic-manipulations", new AppearanceCharacterRace(1, 1, 0), 1, summary ?? Summary,
             fixture.RecordedVersions, "0:1:2");
         var result = HumanCatalogueCapture.CaptureAsync(Label, new HumanCatalogueStore(fixture.Root),
             _ => Task.FromResult(new HumanCatalogueReadResult(read, null)), () => new DateTimeOffset(2026, 11, 3, 0, 0, 0, TimeSpan.Zero),
