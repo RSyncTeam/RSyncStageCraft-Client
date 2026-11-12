@@ -677,21 +677,66 @@ public static class HumanCatalogueSkeletonSummary
             HumanCatalogueEntryCodec.WithoutFileHash(fact.Value)).ToList();
     }
 
-    /// <summary>True when the summary has a partial count of at least one and a line for every partial.</summary>
+    /// <summary>The reader's value for a partial slot that has no skeleton resource.</summary>
+    private const string NoResource = "no resource";
+
+    /// <summary>
+    /// True when the summary is exactly the reader's complete shape: the line
+    /// <c>skeleton partials: N</c> (N at least one), then one line per slot in
+    /// slot order, <c>skeleton 0: bones …</c> for the base slot and, for every
+    /// later slot, <c>skeleton i: bones …</c> or exactly
+    /// <c>skeleton i: no resource</c> (a slot the game left empty), and
+    /// nothing else. A missing, repeated or out-of-order slot, a base slot
+    /// with no resource, any other value, or any <c>skeleton: …</c> line (no
+    /// draw object, none, unreadable) is not comparable.
+    /// </summary>
     public static bool Comparable(IReadOnlyList<string> summary)
     {
         ArgumentNullException.ThrowIfNull(summary);
-        var count = summary.Where(line => line.StartsWith("skeleton partials: ", StringComparison.Ordinal))
-            .Select(line => int.TryParse(line["skeleton partials: ".Length..], out var parsed) ? parsed : -1).DefaultIfEmpty(-1).First();
-        if (count < 1)
+        const string countLead = "skeleton partials: ";
+        if (summary.Count < 2 || summary[0] is not { } first || !first.StartsWith(countLead, StringComparison.Ordinal) ||
+            Count(first.AsSpan(countLead.Length)) is not { } count || summary.Count != count + 1)
             return false;
         for (var index = 0; index < count; index++)
         {
-            var lead = $"skeleton {index}: bones ";
-            if (!summary.Any(line => line.StartsWith(lead, StringComparison.Ordinal)))
+            var lead = $"skeleton {index}: ";
+            if (summary[index + 1] is not { } line || !line.StartsWith(lead, StringComparison.Ordinal))
+                return false;
+            var value = line.AsSpan(lead.Length);
+            if (Bones(value))
+                continue;
+            if (index == 0 || !value.Equals(NoResource, StringComparison.Ordinal))
                 return false;
         }
         return true;
+    }
+
+    /// <summary>One to four ASCII digits with no leading zero, as a count of at least one; otherwise null.</summary>
+    private static int? Count(ReadOnlySpan<char> text)
+    {
+        if (text.Length is < 1 or > 4 || text[0] == '0')
+            return null;
+        var count = 0;
+        foreach (var character in text)
+        {
+            if (!char.IsAsciiDigit(character))
+                return null;
+            count = count * 10 + (character - '0');
+        }
+        return count;
+    }
+
+    /// <summary><c>bones B</c> (B one or more ASCII digits), alone or followed by <c>", "</c> and the hashed fields.</summary>
+    private static bool Bones(ReadOnlySpan<char> value)
+    {
+        const string lead = "bones ";
+        if (!value.StartsWith(lead, StringComparison.Ordinal))
+            return false;
+        var rest = value[lead.Length..];
+        var digits = 0;
+        while (digits < rest.Length && char.IsAsciiDigit(rest[digits]))
+            digits++;
+        return digits > 0 && (digits == rest.Length || rest[digits..].StartsWith(", ", StringComparison.Ordinal));
     }
 
     /// <summary>Null when the actor's lines equal the entry's; otherwise why not.</summary>
