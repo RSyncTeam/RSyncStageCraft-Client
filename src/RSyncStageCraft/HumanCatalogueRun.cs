@@ -1,4 +1,5 @@
 #if RSC_DEVELOPMENT
+using System.Diagnostics;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.Command;
@@ -21,10 +22,17 @@ namespace RSyncStageCraft;
 /// No Customize+ profile is read (C8 is M3, decision D2).</item>
 /// <item><c>list</c>: the catalogue's entries, by label and short id, with
 /// counts, completeness and versions; no path.</item>
+/// <item>HV-5 M2: <c>spawn &lt;label&gt;</c>, <c>spawn-test-scale &lt;label&gt;</c>, <c>remove</c> and
+/// <c>status</c>, run by <see cref="HumanCatalogueSpawnRun"/>: one actor from
+/// one entry, which is read and never modified.</item>
 /// </list>
-/// Nothing is spawned, applied, written to the game, uploaded, exported or
+/// Capture writes nothing to the game; nothing is uploaded, exported or
 /// synchronized. The reads run on the framework thread, one framework call
-/// each; hashing and copying run off it.
+/// each; hashing and copying run off it. At load the retention journal is
+/// read, with the same-process marker: either, for this game process, refuses
+/// spawn and capture until the game restarts; a journal of an earlier process
+/// is cleared. Unload, the capture's step included, stays within one 5-second
+/// bound.
 /// </summary>
 internal sealed class HumanCatalogueRun
 {
@@ -52,6 +60,9 @@ internal sealed class HumanCatalogueRun
     private readonly DalamudAppearancePlayerLocator locator;
     private readonly HumanActorPenumbraIpc penumbra;
     private readonly HumanActorGlamourerIpc glamourer;
+    private readonly Func<int> otherRscActors;
+    private readonly HumanCatalogueSpawnRun spawn;
+    private readonly string? journalRefusal;
     private readonly bool commandAdded;
     private readonly object gate = new();
     private readonly CancellationTokenSource stopping = new();
@@ -67,7 +78,10 @@ internal sealed class HumanCatalogueRun
         IClientState clientState,
         ICondition condition,
         IObjectTable objects,
+        IDataManager data,
+        IPlayerState playerState,
         string configDirectory,
+        Func<int> otherRscActors,
         Func<bool> serverSessionPossible,
         Action<string> log)
     {
@@ -78,46 +92,100 @@ internal sealed class HumanCatalogueRun
         this.condition = condition ?? throw new ArgumentNullException(nameof(condition));
         this.objects = objects ?? throw new ArgumentNullException(nameof(objects));
         this.serverSessionPossible = serverSessionPossible ?? throw new ArgumentNullException(nameof(serverSessionPossible));
+        this.otherRscActors = otherRscActors ?? throw new ArgumentNullException(nameof(otherRscActors));
         this.log = log ?? throw new ArgumentNullException(nameof(log));
         ArgumentException.ThrowIfNullOrWhiteSpace(configDirectory);
         catalogueRoot = Path.Combine(configDirectory, CatalogueFolder);
+        var process = CurrentProcess();
+        // Amendment 1 §3: holds kept by an earlier load of this game process refuse spawn and capture until the game restarts.
+        // Item 7: the same-process marker refuses on its own, so a reload is refused even when both journal writes failed.
+        var marked = HumanCatalogueRetentionMarker.IsSet(process, out var markedCount);
+        journalRefusal = HumanCatalogueJournal.AtLoad(catalogueRoot, process, out var listed) switch
+        {
+            HumanCatalogueJournalState.SameProcess =>
+                $"an earlier load of this game process kept {listed} stored file(s) held after an unconfirmed cleanup; spawn and capture are refused until the game restarts",
+            HumanCatalogueJournalState.Unreadable =>
+                "the retention journal could not be read or cleared; spawn and capture are refused (remove it by hand only after the game has restarted)",
+            _ when marked =>
+                $"an earlier load of this game process recorded {markedCount} stored file(s) held after an unconfirmed cleanup (same-process marker); " +
+                "spawn and capture are refused until the game restarts",
+            _ => null,
+        };
         appearance = new DalamudAppearanceIpc(pluginInterface);
         locator = new DalamudAppearancePlayerLocator(objects);
         penumbra = new HumanActorPenumbraIpc(pluginInterface);
         // The generation is unused here: HV-5 M1 only reads the player's state.
         glamourer = new HumanActorGlamourerIpc(pluginInterface, () => 0);
+        spawn = new HumanCatalogueSpawnRun(pluginInterface, framework, data, playerState, SpawnSceneExit, Store, CurrentVersions, catalogueRoot,
+            process, log);
         commandAdded = commands.AddHandler(Command, new CommandInfo(OnCommand)
         {
             HelpMessage = "HV-5 step, from the Dalamud log window's console only.",
             ShowInHelp = false,
         });
         log(commandAdded
-            ? $"RSC HV-5 runner loaded. Steps, typed only in the Dalamud log window's console: {Command} capture <label>, {Command} list."
+            ? $"RSC HV-5 runner loaded. Steps, typed only in the Dalamud log window's console: {Command} capture <label>, {Command} list, " +
+                $"{Command} spawn <label>, {Command} spawn-test-scale <label>, {Command} remove, {Command} status."
             : "RSC HV-5 runner loaded without its command; no step can run.");
+        if (journalRefusal is not null)
+            log("RSC HV-5: " + journalRefusal + ".");
+        // Last: the spawn runner's plugin-list subscription, so a constructor that throws leaves none behind.
+        spawn.Subscribe();
     }
 
-    /// <summary>Game thread, every framework update: starts the pending step, if any.</summary>
+    /// <summary>1 while HV-5's actor exists; read by the T3-1 and HV-1 to HV-4 runners' scene checks.</summary>
+    internal int LiveCount => spawn.LiveCount;
+
+    /// <summary>Game thread, every framework update: the pending step, if any, then the spawn's draw steps.</summary>
     internal void Tick()
     {
         if (shutDown)
             return;
         string? step;
+        bool stepRunning;
         lock (gate)
         {
             step = pending;
             pending = null;
-            if (step is null)
-                return;
-            if (running is { IsCompleted: false })
-            {
-                log("RSC HV-5 refused: a step is still running.");
-                return;
-            }
+            stepRunning = running is { IsCompleted: false };
         }
-        string chosen = step;
-        if (SceneExit() is { } exit)
+        if (step is not null)
+            Run(step, stepRunning);
+        spawn.Tick();
+    }
+
+    /// <summary>Game thread: one step. <c>remove</c> and <c>status</c> always run; the others are refused while anything blocks them.</summary>
+    private void Run(string chosen, bool stepRunning)
+    {
+        if (chosen is "remove" or "status")
+        {
+            spawn.Step(chosen);
+            return;
+        }
+        if (stepRunning)
+        {
+            log("RSC HV-5 refused: a step is still running.");
+            return;
+        }
+        if (journalRefusal is not null && chosen != "list")
+        {
+            log($"RSC HV-5 refused: {journalRefusal}.");
+            return;
+        }
+        var spawnStep = HumanCatalogueSpawnCommand.TryParse(chosen, out _, out _);
+        if (chosen.StartsWith("capture ", StringComparison.Ordinal) && spawn.Busy)
+        {
+            log("RSC HV-5 refused: a spawn is being prepared, an actor exists, or stored files are held; capture after the removal.");
+            return;
+        }
+        if ((spawnStep ? SpawnSceneExit() : SceneExit()) is { } exit)
         {
             log($"RSC HV-5 refused: {exit}.");
+            return;
+        }
+        if (spawnStep)
+        {
+            spawn.Step(chosen);
             return;
         }
         var token = stopping.Token;
@@ -135,6 +203,7 @@ internal sealed class HumanCatalogueRun
     /// that thread), and it ends through the cancellation and the unloading
     /// checks. A cancelled copy leaves no partial file, an entry is written
     /// whole or not at all, and nothing is logged once unloading has begun.
+    /// First HV-5 M2's spawn is unloaded (<see cref="HumanCatalogueSpawnRun.Shutdown"/>), then the step is waited for with what is left of the one 5 s bound.
     /// </summary>
     internal void Shutdown()
     {
@@ -144,19 +213,25 @@ internal sealed class HumanCatalogueRun
         if (commandAdded)
             commands.RemoveHandler(Command);
         stopping.Cancel();
+        // One bound for the whole unload: the spawn's cleanup first (it changes the game), then the capture's step with what is left.
+        var clock = Stopwatch.StartNew();
+        TimeSpan Remaining() => UnloadWait - clock.Elapsed;
+        spawn.Shutdown(Remaining);
         Task? task;
         lock (gate)
             task = running;
-        if (task is null || framework.IsInFrameworkUpdateThread)
-            return;
-        try
+        if (task is not null && !framework.IsInFrameworkUpdateThread)
         {
-            if (!task.Wait(UnloadWait))
-                log("RSC HV-5 unload did not finish its step within 5 s; a leftover temporary file is removed at the next start.");
-        }
-        catch (AggregateException)
-        {
-            // Cancelled or failed: reported by the step itself where it could be.
+            try
+            {
+                var left = Remaining();
+                if (!task.IsCompleted && (left <= TimeSpan.Zero || !task.Wait(left)))
+                    log("RSC HV-5 unload did not finish its step within the 5 s bound; a leftover temporary file is removed at the next start.");
+            }
+            catch (AggregateException)
+            {
+                // Cancelled or failed: reported by the step itself where it could be.
+            }
         }
     }
 
@@ -166,13 +241,15 @@ internal sealed class HumanCatalogueRun
             return;
         var text = arguments.Trim();
         string step;
-        if (text == "list")
-            step = "list";
-        else if (text.StartsWith("capture ", StringComparison.Ordinal) && text.Length > "capture ".Length)
+        if (text is "list" or "remove" or "status")
+            step = text;
+        else if ((text.StartsWith("capture ", StringComparison.Ordinal) && text.Length > "capture ".Length) ||
+                 HumanCatalogueSpawnCommand.TryParse(text, out _, out _))
             step = text;
         else
         {
-            log($"RSC HV-5 unknown step; use {Command} capture <label>, or {Command} list.");
+            log($"RSC HV-5 unknown step; use {Command} capture <label>, {Command} list, {Command} spawn <label>, " +
+                $"{Command} spawn-test-scale <label>, {Command} remove, or {Command} status.");
             return;
         }
         lock (gate)
@@ -324,8 +401,7 @@ internal sealed class HumanCatalogueRun
                 .ToList();
             if (!locator.IsStill(player))
                 return HumanCatalogueReadResult.Refused(changed);
-            var versions = new HumanCatalogueVersions(DalamudGameVersion.Read(), LoadedVersion("Penumbra"), LoadedVersion("Glamourer"),
-                LoadedVersion("CustomizePlus"));
+            var versions = CurrentVersions();
             return new HumanCatalogueReadResult(new HumanCatalogueRead(modDirectory, resources, state, reference, manipulations, race, bodyType,
                 summary, versions, $"{player.ObjectIndex}:{player.Address}:{player.GameObjectId}"), null);
         }
@@ -351,6 +427,32 @@ internal sealed class HumanCatalogueRun
         catch
         {
             return null;
+        }
+    }
+
+    /// <summary>The versions now, as the capture records them (C9): game, Penumbra, Glamourer and Customize+ (read only).</summary>
+    private HumanCatalogueVersions CurrentVersions() =>
+        new(DalamudGameVersion.Read(), LoadedVersion("Penumbra"), LoadedVersion("Glamourer"), LoadedVersion("CustomizePlus"));
+
+    /// <summary>The game process: its id and start time, for the retention journal.</summary>
+    private static HumanCatalogueProcess CurrentProcess()
+    {
+        using var process = Process.GetCurrentProcess();
+        return new HumanCatalogueProcess(process.Id, process.StartTime.ToUniversalTime().Ticks);
+    }
+
+    /// <summary>HV-5 M2: a capture's scene checks, and no other RSC actor or puppet. Total.</summary>
+    private string? SpawnSceneExit()
+    {
+        if (SceneExit() is { } exit)
+            return exit;
+        try
+        {
+            return otherRscActors() != 0 ? "another RSC actor or puppet is in the scene" : null;
+        }
+        catch (Exception exception)
+        {
+            return $"the scene could not be read ({exception.GetType().Name})";
         }
     }
 

@@ -629,6 +629,8 @@ internal sealed class FakeHumanActorPenumbra(FakeHumanActorScene scene) : IHuman
     public int ModsLeft => collections.Values.Count(mod => mod is not null);
     public IReadOnlyDictionary<string, string>? ModPaths { get; private set; }
     public string? ModMeta { get; private set; }
+    public string? ModTag { get; private set; }
+    public string? CollectionName { get; private set; }
 
     public int ParentOf(int index) => Parents.TryGetValue(index, out var parent) ? parent : -1;
 
@@ -689,6 +691,7 @@ internal sealed class FakeHumanActorPenumbra(FakeHumanActorScene scene) : IHuman
     public Guid? CreateTemporaryCollection(string name)
     {
         Scene.Calls.Add("penumbra create");
+        CollectionName = name;
         if (!CreateAnswers)
             return null;
         var id = Guid.NewGuid();
@@ -700,6 +703,7 @@ internal sealed class FakeHumanActorPenumbra(FakeHumanActorScene scene) : IHuman
     public bool AddTemporaryMod(string tag, Guid collection, IReadOnlyDictionary<string, string> paths, string meta, int priority)
     {
         Scene.Calls.Add("penumbra mod");
+        ModTag = tag;
         if (!ModAnswer || !collections.ContainsKey(collection))
             return false;
         collections[collection] = new Dictionary<string, string>(paths, StringComparer.OrdinalIgnoreCase);

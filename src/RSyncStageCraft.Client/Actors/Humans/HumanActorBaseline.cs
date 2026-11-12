@@ -86,6 +86,81 @@ public enum HumanActorPhase
     /// <summary>HV-2 only: no human draw object seen after the undraw, and the draw requested again at alpha 0; waiting for a new one.</summary>
     WaitingForRebuild,
     Visible,
+
+    /// <summary>HV-5 only (BC-8): the split Penumbra apply's collection, mod and assignment, one per update, at alpha 0.</summary>
+    Assigning,
+
+    /// <summary>HV-5 only: phase 1 confirmed and the skeleton matched, still at alpha 0; the entry's Glamourer state is applied on this update.</summary>
+    Dressing,
+
+    /// <summary>HV-5 only: the Glamourer state applied, still at alpha 0; waiting for phase 2, the skeleton again and any test scale, then the show.</summary>
+    Settling,
+
+    /// <summary>
+    /// HV-5 M2 r2 only (U-4): the human draw object was lost or replaced while
+    /// the actor was visible; hidden again at alpha 0, waiting for every
+    /// confirmation to hold again on the current draw object before it is
+    /// shown again. Nothing is applied again.
+    /// </summary>
+    Reconfirming,
+}
+
+/// <summary>
+/// HV-5 M2: what one spawn from a catalogue entry adds to HV-4's sequence.
+/// <list type="bullet">
+/// <item>The match: the copied actor's race, clan, gender and body type must
+/// be the entry's (customize bytes 0, 4, 1 and 2).</item>
+/// <item><paramref name="PhaseOneRequired"/>: the packaged redirects that must
+/// be reported before Glamourer: the base skeleton's files and the deformer,
+/// which the copy loads whatever it wears (U-1).</item>
+/// <item><paramref name="BaseSkeletonMismatch"/>: the actor's base partial
+/// skeleton against the entry's, before Glamourer; null when equal, otherwise
+/// why not (no bone name or path in it).</item>
+/// <item><paramref name="SkeletonMismatch"/>: the actor's whole skeleton
+/// summary against the entry's, after Glamourer and before the show.</item>
+/// <item><paramref name="Glamourer"/>: the entry's state, flags and reference.</item>
+/// <item><paramref name="Deformer"/>: the entry's package redirects the deformer.</item>
+/// <item><paramref name="TestScale"/>: HV-4's fixed Customize+ profile is
+/// applied before the show (owner decision D14, a regression check only).</item>
+/// <item><paramref name="ShowCheck"/>: begun when the entry's state is
+/// applied and answered before the show (U-5: the deformer re-check); a
+/// refusal halts the actor while it is hidden.</item>
+/// <item><paramref name="DrawObject"/>: the address of the actor's human draw
+/// object, or 0 (U-4: compared only, to see it lost or replaced while the
+/// actor is visible). Required for a spawn from an entry.</item>
+/// </list>
+/// The label is not part of the plan: it never reaches the actor or a provider.
+/// </summary>
+public sealed record HumanActorSpawnPlan(
+    byte Race,
+    byte Tribe,
+    byte Sex,
+    byte BodyType,
+    IReadOnlySet<string> PhaseOneRequired,
+    Func<nint, string?> BaseSkeletonMismatch,
+    Func<nint, string?> SkeletonMismatch,
+    HumanGlamourerPayload Glamourer,
+    bool Deformer,
+    bool TestScale,
+    IHumanActorShowCheck? ShowCheck = null,
+    Func<nint, nint>? DrawObject = null)
+{
+    /// <summary>Never the plan's data.</summary>
+    public override string ToString() => "HV-5 spawn plan";
+}
+
+/// <summary>HV-5 M2: a check begun on the game thread after the Glamourer apply and answered before the show.</summary>
+public interface IHumanActorShowCheck
+{
+    /// <summary>
+    /// Game thread, when the entry's state is applied, and again after a
+    /// redraw seen while the actor was visible (U-4). Each call starts a new
+    /// check; a later <see cref="Poll"/> answers the latest one.
+    /// </summary>
+    void Begin();
+
+    /// <summary>Game thread, before the show: null when it holds; <paramref name="pending"/> while it is still running.</summary>
+    string? Poll(out bool pending);
 }
 
 /// <summary>
@@ -151,6 +226,31 @@ public enum HumanActorPhase
 /// name and kind are read back. Every Glamourer check (the early probe, the
 /// apply and the revert) and the Customize+ apply then require W-3. Without
 /// the Customize+ stage none of this happens.</para>
+/// <para>HV-5 M2 adds <see cref="Spawn(HumanActorSpawnPlan?)"/> with a plan,
+/// used only with all four stages and W-3 (BC-1, BC-2: HV-5 always composes
+/// the Customize+ stage, so W-3 and the detach run for every HV-5 spawn).
+/// Without a plan the sequence is HV-4's exactly. With one: the match halts
+/// the actor before any provider call; a split Penumbra apply takes three
+/// further updates; after the rebuild, phase 1 (the skeleton group's
+/// redirects, nothing elsewhere) and the actor's skeleton summary; then, still
+/// at alpha 0, the entry's Glamourer state; then phase 2 (every packaged
+/// redirect) and the skeleton again within the settle bound; then the
+/// optional test scale; and the show last (BC-7). Cleanup is HV-4's.</para>
+/// <para>HV-5 M2 r2 (U-4): while the actor is visible, each framework update
+/// compares its human draw object with the one the confirmations held on.
+/// When it is lost or replaced the actor is hidden on that update (after the
+/// update's ownership checks; an actor no longer provably RSC's is never
+/// written and follows the loss path) and enters
+/// <see cref="HumanActorPhase.Reconfirming"/>: phase 2, the whole skeleton,
+/// the deformer re-check, the identity, parents, home world and plugin
+/// generations, and the Glamourer readback must all hold again on the current
+/// draw object before it is shown again. Nothing is applied again; any
+/// failure halts through the existing cleanup. <b>Detection window:</b> the
+/// change is seen on RSC's next framework update, not when the game makes
+/// it. A new draw object built between two updates can be drawn at alpha 1
+/// for the frames before that update; this narrows the exposure, it does not
+/// prevent it. A change made without a new draw object (in place, or one
+/// allocated again at the same address) is not seen.</para>
 /// </summary>
 public sealed class HumanActorBaseline
 {
@@ -169,6 +269,18 @@ public sealed class HumanActorBaseline
     /// 60 fps). A path resolved elsewhere refuses at once.
     /// </summary>
     public const int SettleLimit = 60;
+
+    /// <summary>
+    /// HV-5: updates after the Glamourer apply before phase 2 is read (about
+    /// 0.5 s at 60 fps). A heuristic delay only: it does not prove that a
+    /// redraw Glamourer or Penumbra queued has run or finished. What holds is
+    /// narrower: phase 2 is read on the draw object present after the delay,
+    /// any loss or replacement of the draw object before the show clears phase
+    /// 2 and reads it again on the new one, and one after the show hides the
+    /// actor and reconfirms it from this window on (U-4, r2). The window
+    /// itself proves nothing about queued work.
+    /// </summary>
+    public const int GlamourerQuiet = 30;
 
     /// <summary>The draw is never requested on the spawn's own update, as in the posing tool's sequence.</summary>
     public const int FirstReadyCheck = 2;
@@ -252,9 +364,23 @@ public sealed class HumanActorBaseline
     /// <summary>1 while an actor exists (any phase), else 0.</summary>
     public int LiveCount => actor is null ? 0 : 1;
 
+    /// <summary>HV-5: deletions whose slot did not read back empty (the actor's deletion was not confirmed).</summary>
+    public int UnconfirmedDeletions { get; private set; }
+
     /// <summary>The spawn, on the game thread. True when the actor was built and is waiting to draw.</summary>
-    public bool Spawn()
+    public bool Spawn() => Spawn(null);
+
+    /// <summary>
+    /// The spawn, on the game thread, with HV-5's <paramref name="plan"/>
+    /// (null: HV-1 to HV-4's sequence exactly). True when the actor was built
+    /// and is waiting to draw.
+    /// </summary>
+    public bool Spawn(HumanActorSpawnPlan? plan)
     {
+        if (plan is not null && (penumbra is null || glamourer is null || customizePlus is null || world is null))
+            return Refuse("a spawn from an entry needs the Penumbra, Glamourer and Customize+ stages and W-3");
+        if (plan is not null && plan.DrawObject is null)
+            return Refuse("a spawn from an entry needs the draw-object read");
         if (Stop is not null)
             return Refuse("an earlier step stopped; nothing is retried until unload");
         if (actor is not null)
@@ -271,6 +397,9 @@ public sealed class HumanActorBaseline
         // HV-4 only: W-3's row, in English and in the client's language, and the player's worlds, read only, before anything is created.
         if (world is not null && WorldRefusal(world, player) is { } worldRefusal)
             return Refuse(worldRefusal);
+        // HV-5 only: the entry's Glamourer state, flags and reference, set while nothing is applied.
+        if (plan is not null && glamourer!.UseEntry(plan.Glamourer) is { } notReady)
+            return Refuse(notReady);
 
         // 1. A name no object in the table carries (ignoring case and world).
         var name = FreshName();
@@ -329,6 +458,16 @@ public sealed class HumanActorBaseline
             return Halt("copy", "the copies changed the name", candidate);
         if (!customizeFilled)
             return Halt("copy", "the copies left no appearance", candidate);
+        // HV-5 only: the match, before any provider call (the entry's race, clan, gender and body type).
+        if (plan is not null)
+        {
+            if (MatchRefusal(copied.Customize!, plan) is { } mismatch)
+                return Halt("match", mismatch, candidate);
+            candidate.Plan = plan;
+            // No Customize+ apply unless the test scale was asked for (D14); the detach still runs.
+            candidate.CustomizePlusTried = !plan.TestScale;
+            log(prefix + "match: the actor's race, clan, gender and body type are the entry's.");
+        }
 
         // 4b. HV-4 only: the home world alone, on the proven actor, after the copies and before the
         // placement, the draw and any provider call; ownership again, then the world, name and kind read back.
@@ -435,12 +574,13 @@ public sealed class HumanActorBaseline
                             Lost(lostAtApply);
                             break;
                         }
-                        // RSC's own redraw: the first draw object was built before the
-                        // assignment, so it is released and a new one is built under it.
-                        backend.DisableDraw(current.Address);
-                        current.UndrawUpdate = current.Updates;
-                        current.Released = false;
-                        current.Phase = HumanActorPhase.WaitingForRelease;
+                        // HV-5 (BC-8): the collection, the mod and the assignment follow, one per update.
+                        if (penumbra.Assigning)
+                        {
+                            current.Phase = HumanActorPhase.Assigning;
+                            break;
+                        }
+                        BeginRebuild(current);
                         break;
                     }
                     backend.SetAlpha(current.Address, 1f);
@@ -472,12 +612,26 @@ public sealed class HumanActorBaseline
                         : "a human draw object was still reported after the undraw; the rebuild cannot be proved", current);
                 }
                 break;
+            case HumanActorPhase.Assigning:
+                if (penumbra!.Advance(out var assigned) is { } refusedStep)
+                {
+                    Halt("penumbra", refusedStep, current);
+                    break;
+                }
+                if (assigned)
+                    BeginRebuild(current);
+                break;
             case HumanActorPhase.WaitingForRebuild:
                 if (backend.ReadFacts(current.Address).HasHumanModel)
                 {
                     var stage = penumbra!;
                     if (current.RebuiltUpdate < 0)
                         current.RebuiltUpdate = current.Updates;
+                    if (current.Plan is { } plan)
+                    {
+                        PhaseOne(current, stage, plan);
+                        break;
+                    }
                     if (stage.Confirm(out var settling) is { } unconfirmed)
                     {
                         // Only redirects not yet reported are read again, within the window.
@@ -499,6 +653,40 @@ public sealed class HumanActorBaseline
                 {
                     Halt("redraw", $"no new human draw object within {RedrawLimit} updates of the draw", current);
                 }
+                break;
+            case HumanActorPhase.Dressing:
+                // HV-5: the entry's state, once, still at alpha 0.
+                current.GlamourerTried = true;
+                if (glamourer!.Apply(current.GlobalIndex, GlamourerChecks(current)) is { } refusedDress)
+                {
+                    Halt("glamourer", refusedDress.StartsWith(GlamourerPrefix, StringComparison.Ordinal)
+                        ? refusedDress[GlamourerPrefix.Length..] : refusedDress, current);
+                    break;
+                }
+                current.DressUpdate = current.Updates;
+                current.SettledFrom = -1;
+                current.DrawObject = 0;
+                if (BeginShowCheck(current) is { } notBegun)
+                {
+                    Halt("show check", notBegun, current);
+                    break;
+                }
+                current.Phase = HumanActorPhase.Settling;
+                break;
+            case HumanActorPhase.Settling:
+            case HumanActorPhase.Reconfirming:
+                PhaseTwo(current);
+                break;
+            case HumanActorPhase.Visible when current.Plan is not null:
+                // HV-5: any plugin load or unload while the actor exists halts it.
+                if (customizePlus!.PluginsUnchanged() is { } moved)
+                {
+                    Halt("customize+", moved[CustomizePlusPrefix.Length..], current);
+                    break;
+                }
+                // U-4: the draw object the confirmations held on, read on every update while visible.
+                if (DrawObjectOf(current) is var seen && seen != current.DrawObject)
+                    Redrawn(current, seen);
                 break;
             case HumanActorPhase.Visible:
                 // HV-3: once, on the first update after the actor is visible.
@@ -557,6 +745,290 @@ public sealed class HumanActorBaseline
     public string Status() => prefix + $"status: {Phase}, stop {(Stop is null ? "none" : "latched")}, residue {Residue}" +
         (penumbra is null ? "." : $", temporary collection {(penumbra.Holding ? "held" : "none")}, collection residue {penumbra.Residue}" +
             (glamourer is null ? "." : $", {glamourer.Status()}" + (customizePlus is null ? "." : $", {customizePlus.Status()}.")));
+
+    /// <summary>RSC's own redraw: the first draw object was built before the assignment, so it is released and a new one is built under it.</summary>
+    private void BeginRebuild(Actor current)
+    {
+        backend.DisableDraw(current.Address);
+        current.UndrawUpdate = current.Updates;
+        current.Released = false;
+        current.Phase = HumanActorPhase.WaitingForRelease;
+    }
+
+    /// <summary>
+    /// HV-5, on the rebuilt draw object: phase 1 (the base skeleton's and the
+    /// deformer's redirects reported, nothing packaged resolved elsewhere),
+    /// then the actor's base partial skeleton, each re-read within the settle
+    /// bound; then Glamourer next. The copy still wears the player's current
+    /// look here, so its face, hair and gear are checked only in phase 2.
+    /// </summary>
+    private void PhaseOne(Actor current, HumanActorPenumbraStage stage, HumanActorSpawnPlan plan)
+    {
+        var inWindow = current.Updates - current.RebuiltUpdate < SettleLimit;
+        if (!current.PhaseOneConfirmed)
+        {
+            if (stage.Confirm(plan.PhaseOneRequired, "Penumbra phase 1 confirmed", out var settling) is { } unconfirmed)
+            {
+                if (!settling || !inWindow)
+                    Halt("phase 1", unconfirmed, current);
+                return;
+            }
+            current.PhaseOneConfirmed = true;
+        }
+        if (SkeletonMismatch(current, baseOnly: true) is { } skeleton)
+        {
+            if (!inWindow)
+                Halt("skeleton", skeleton, current);
+            return;
+        }
+        log(prefix + "phase 1: the actor's base skeleton equals the entry's; the rest of the look is checked after Glamourer; still alpha 0; " +
+            "Glamourer next.");
+        current.Phase = HumanActorPhase.Dressing;
+    }
+
+    /// <summary>
+    /// HV-5, after the Glamourer apply: a new draw object if Glamourer rebuilt
+    /// it, phase 2 (every packaged redirect, nothing elsewhere) and the
+    /// skeleton again within the settle bound, then the test scale if asked
+    /// for (the show waits one update after it), then the show.
+    /// </summary>
+    private void PhaseTwo(Actor current)
+    {
+        var again = current.Phase == HumanActorPhase.Reconfirming;
+        var draw = DrawObjectOf(current);
+        if (draw == 0)
+        {
+            // A rebuild: phase 2 is read again on the new draw object.
+            current.SettledFrom = -1;
+            current.PhaseTwoConfirmed = false;
+            current.DrawObject = 0;
+            if (current.Updates - current.DressUpdate > RedrawLimit)
+                Halt(again ? "reconfirm" : "phase 2",
+                    $"no human draw object within {RedrawLimit} updates of {(again ? "the redraw" : "the Glamourer apply")}", current);
+            return;
+        }
+        if (current.DrawObject != 0 && draw != current.DrawObject)
+        {
+            // Replaced while settling (r2): everything is read again on the new one, within the loss's bound.
+            current.SettledFrom = -1;
+            current.PhaseTwoConfirmed = false;
+            current.DrawObject = draw;
+            if (current.Updates - current.DressUpdate > RedrawLimit)
+                Halt(again ? "reconfirm" : "phase 2",
+                    $"the human draw object was still being replaced {RedrawLimit} updates after {(again ? "the redraw" : "the Glamourer apply")}", current);
+            return;
+        }
+        current.DrawObject = draw;
+        if (current.Updates - current.DressUpdate < GlamourerQuiet)
+            return;
+        if (current.SettledFrom < 0)
+            current.SettledFrom = current.Updates;
+        var inWindow = current.Updates - current.SettledFrom < SettleLimit;
+        if (!current.PhaseTwoConfirmed)
+        {
+            if (penumbra!.Confirm(null, again ? "Penumbra reconfirmed after the redraw" : "Penumbra phase 2 confirmed", out var settling) is { } unconfirmed)
+            {
+                if (!settling || !inWindow)
+                    Halt(again ? "reconfirm phase 2" : "phase 2", unconfirmed, current);
+                return;
+            }
+            current.PhaseTwoConfirmed = true;
+        }
+        if (SkeletonMismatch(current) is { } skeleton)
+        {
+            if (!inWindow)
+                Halt(again ? "reconfirm skeleton" : "skeleton", skeleton, current);
+            return;
+        }
+        if (!current.CustomizePlusTried)
+        {
+            // D14: HV-4's fixed profile, a regression check only, still at alpha 0.
+            current.CustomizePlusTried = true;
+            if (customizePlus!.Apply(current.GlobalIndex, CustomizePlusChecks(current)) is { } refusedProfile)
+                Halt("customize+", refusedProfile.StartsWith(CustomizePlusPrefix, StringComparison.Ordinal)
+                    ? refusedProfile[CustomizePlusPrefix.Length..] : refusedProfile, current);
+            return;
+        }
+        Show(current);
+    }
+
+    /// <summary>HV-5 (BC-7): the show, last, after every check holds again.</summary>
+    private void Show(Actor current)
+    {
+        var again = current.Phase == HumanActorPhase.Reconfirming;
+        var show = again ? "reconfirm show" : "show";
+        if (GlamourerChecks(current) is { } unowned)
+        {
+            Halt(show, unowned, current);
+            return;
+        }
+        if (customizePlus!.StillDetached(current.GlobalIndex) is { } attached)
+        {
+            Halt(again ? "reconfirm customize+" : "customize+", attached[CustomizePlusPrefix.Length..], current);
+            return;
+        }
+        if (glamourer!.State != HumanGlamourerState.Applied)
+        {
+            Halt(show, $"the Glamourer state is {glamourer.State}, not applied", current);
+            return;
+        }
+        // U-4: after a redraw, the entry's state is read back again; nothing is applied again.
+        if (again && !current.Reread)
+        {
+            if (glamourer.Reread(current.GlobalIndex, GlamourerChecks(current)) is { } differs)
+            {
+                Halt("reconfirm glamourer", differs.StartsWith(GlamourerPrefix, StringComparison.Ordinal) ? differs[GlamourerPrefix.Length..] : differs, current);
+                return;
+            }
+            current.Reread = true;
+        }
+        var plan = current.Plan!;
+        if (plan.TestScale != (customizePlus.State == HumanCustomizePlusState.Applied))
+        {
+            Halt(show, $"the Customize+ profile is {customizePlus.State}, not as asked", current);
+            return;
+        }
+        if (plan.ShowCheck is { } showCheck)
+        {
+            string? refusal;
+            bool pending;
+            try
+            {
+                refusal = showCheck.Poll(out pending);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                refusal = $"the check failed ({exception.GetType().Name})";
+                pending = false;
+            }
+            if (pending)
+            {
+                if (current.ShowWaitFrom < 0)
+                    current.ShowWaitFrom = current.Updates;
+                if (current.Updates - current.ShowWaitFrom > RedrawLimit)
+                    Halt(again ? "reconfirm show check" : "show check", $"no answer within {RedrawLimit} updates", current);
+                return;
+            }
+            if (refusal is not null)
+            {
+                Halt(again ? "reconfirm show check" : "show check", refusal, current);
+                return;
+            }
+        }
+        // U-4: shown only on the draw object every confirmation above held on. A change reads them all again:
+        // the recorded one is kept, so the next phase 2 sees a replacement and its bound applies.
+        if (DrawObjectOf(current) != current.DrawObject)
+        {
+            current.SettledFrom = -1;
+            current.PhaseTwoConfirmed = false;
+            current.Reread = false;
+            return;
+        }
+        backend.SetAlpha(current.Address, 1f);
+        current.Phase = HumanActorPhase.Visible;
+        current.ShownUpdate = current.Updates;
+        if (again)
+        {
+            log(prefix + $"visible again: reconfirmation {current.Reconfirmations} held on the current draw object " +
+                $"{current.Updates - current.RedrawnUpdate} update(s) after the redraw was seen (phase 2, the whole skeleton, " +
+                (plan.ShowCheck is not null ? "the deformer re-check, " : "") +
+                "identity, parents, home world, plugin generations and the Glamourer readback); nothing applied again; alpha 1.");
+            return;
+        }
+        log(prefix + $"visible: shown last, {current.Updates - current.UndrawUpdate} update(s) after the undraw, alpha 1. " +
+            (plan.Deformer
+                ? "Skeleton matched on the actor; deformer resolved for its collection and equal to the player's" +
+                    (plan.ShowCheck is not null ? ", checked again before the show; " : "; not checked again before the show; ") +
+                    "use of the deformer unproven (GAP-K4 open)."
+                : "Skeleton matched on the actor; no deformer is redirected, on the entry or the player."));
+    }
+
+    /// <summary>
+    /// HV-5 M2 r2 (U-4): the human draw object changed while the actor was
+    /// visible. This update's ownership checks have held (they run first on
+    /// every update), so the actor is hidden now, then reconfirmed from the
+    /// quiet window on. Nothing is applied again.
+    /// </summary>
+    private void Redrawn(Actor current, nint seen)
+    {
+        if (Write(current, "hide after the redraw", owned => backend.SetAlpha(owned, 0f)) is { } lost)
+        {
+            Lost(lost);
+            return;
+        }
+        current.Reconfirmations++;
+        current.RedrawnUpdate = current.Updates;
+        log(prefix + $"redraw seen while visible: the human draw object was {(seen == 0 ? "lost" : "replaced")} " +
+            $"{current.Updates - current.ShownUpdate} update(s) after the show; alpha 0 on the update it was seen (a new draw object " +
+            "may have been drawn unconfirmed for the frames before it); reconfirming before any show; nothing is applied again.");
+        current.Phase = HumanActorPhase.Reconfirming;
+        current.DressUpdate = current.Updates;
+        current.SettledFrom = -1;
+        current.PhaseTwoConfirmed = false;
+        current.DrawObject = 0;
+        current.ShowWaitFrom = -1;
+        current.Reread = false;
+        if (BeginShowCheck(current) is { } notBegun)
+            Halt("reconfirm show check", notBegun, current);
+    }
+
+    /// <summary>HV-5: begins the plan's show check, if any. Null when begun.</summary>
+    private static string? BeginShowCheck(Actor current)
+    {
+        if (current.Plan?.ShowCheck is not { } showCheck)
+            return null;
+        try
+        {
+            showCheck.Begin();
+            return null;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            return $"could not begin ({exception.GetType().Name})";
+        }
+    }
+
+    /// <summary>HV-5: the actor's human draw object (0 when it has none or it cannot be read), total.</summary>
+    private nint DrawObjectOf(Actor owned)
+    {
+        if (!backend.ReadFacts(owned.Address).HasHumanModel)
+            return 0;
+        try
+        {
+            return owned.Plan?.DrawObject?.Invoke(owned.Address) ?? 0;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>HV-5: the plan's skeleton comparison (the base partial only, or the whole summary), total.</summary>
+    private static string? SkeletonMismatch(Actor owned, bool baseOnly = false)
+    {
+        try
+        {
+            return baseOnly ? owned.Plan!.BaseSkeletonMismatch(owned.Address) : owned.Plan!.SkeletonMismatch(owned.Address);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            return $"the actor's skeleton could not be read ({exception.GetType().Name})";
+        }
+    }
+
+    /// <summary>HV-5: the copied customize bytes against the entry's (race 0, gender 1, body type 2, clan 4). Null when all match.</summary>
+    private static string? MatchRefusal(byte[] customize, HumanActorSpawnPlan plan)
+    {
+        if (customize[0] != plan.Race)
+            return "the actor's race is not the entry's";
+        if (customize[4] != plan.Tribe)
+            return "the actor's clan is not the entry's";
+        if (customize[1] != plan.Sex)
+            return "the actor's gender is not the entry's";
+        if (customize[2] != plan.BodyType)
+            return "the actor's body type is not the entry's";
+        return null;
+    }
 
     /// <summary>Two yalms along the player's facing, turned to face the player.</summary>
     public static HumanActorPlacement InFrontOf(HumanActorPlacement player)
@@ -712,7 +1184,10 @@ public sealed class HumanActorBaseline
         backend.DisableDraw(owned.Address);
         backend.DeleteComObject(owned.ComIndex);
         actor = null;
-        return backend.ComObjectByIndex(owned.ComIndex) != owned.Address && backend.ComEntry(owned.ComIndex) != owned.Address;
+        var empty = backend.ComObjectByIndex(owned.ComIndex) != owned.Address && backend.ComEntry(owned.ComIndex) != owned.Address;
+        if (!empty)
+            UnconfirmedDeletions++;
+        return empty;
     }
 
     private bool Refuse(string why)
@@ -805,6 +1280,17 @@ public sealed class HumanActorBaseline
         public int RebuiltUpdate { get; set; } = -1;
         public bool GlamourerTried { get; set; }
         public bool CustomizePlusTried { get; set; }
+        public HumanActorSpawnPlan? Plan { get; set; }
+        public bool PhaseOneConfirmed { get; set; }
+        public bool PhaseTwoConfirmed { get; set; }
+        public int DressUpdate { get; set; }
+        public int SettledFrom { get; set; } = -1;
+        public int ShowWaitFrom { get; set; } = -1;
+        public nint DrawObject { get; set; }
+        public int ShownUpdate { get; set; }
+        public int RedrawnUpdate { get; set; }
+        public int Reconfirmations { get; set; }
+        public bool Reread { get; set; }
     }
 }
 #endif

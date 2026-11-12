@@ -710,7 +710,7 @@ public sealed class HumanActorGlamourerTests
         var methods = typeof(IHumanActorGlamourer).GetMethods().Select(method => method.Name).Order(StringComparer.Ordinal).ToArray();
         Assert.Equal(new[]
         {
-            "ApplyState", "CanUnlock", "GetState", "RevertState", "UnlockState",
+            "ApplyState", "CanUnlock", "GetState", "GetStateJson", "RevertState", "UnlockState",
             "get_ApiVersion", "get_Generation", "get_GlamourerVersion", "get_PenumbraVersion",
         }.Order(StringComparer.Ordinal), methods);
         Assert.Empty(typeof(IHumanActorGlamourer).GetEvents());
@@ -819,6 +819,22 @@ public sealed class FakeHumanActorGlamourer : IHumanActorGlamourer
         if (!States.TryGetValue(identity, out var state))
             States[identity] = state = new State(0);
         return (HumanActorGlamourerStage.Success, new Dictionary<string, ulong>(state.Items, StringComparer.Ordinal));
+    }
+
+    /// <summary>HV-5: the whole state's JSON the readback returns for an identity with a state.</summary>
+    public string StateJson { get; set; } = "{}";
+    public int? GetJsonAnswer { get; set; }
+
+    public (int Code, string? Json) GetStateJson(int objectIndex, uint key)
+    {
+        Record("getjson", objectIndex, key, 0);
+        if (Throws.Contains("getjson"))
+            throw new InvalidOperationException();
+        if (GetJsonAnswer is { } answer)
+            return (answer, null);
+        if (IdentityAt(objectIndex) is not { } identity)
+            return (HumanActorGlamourerStage.ActorNotFound, null);
+        return (HumanActorGlamourerStage.Success, States.ContainsKey(identity) ? StateJson : "{}");
     }
 
     public int RevertState(int objectIndex, uint key, ulong flags)

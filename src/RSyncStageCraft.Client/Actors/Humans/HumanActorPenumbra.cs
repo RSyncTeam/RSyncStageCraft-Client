@@ -161,6 +161,14 @@ public sealed record HumanActorPenumbraPackage(
 /// assigned collection instead makes Penumbra (1.7.2.1) drop its temporary
 /// mods with no mod-setting event. Without an assignment the mod is removed
 /// first, as in HV-2: no actor resolves to the collection then.</para>
+/// <para>HV-5 M2 (init options, each off by default, so HV-2 to HV-4 are
+/// unchanged): <see cref="PackageSource"/> supplies the package and its
+/// manipulations from a catalogue entry instead of the player's current
+/// resources (BC-3); <see cref="ModTag"/> and <see cref="TemporaryCollectionName"/>
+/// name HV-5's own mod and collection (BC-9); <see cref="Split"/> spreads the
+/// collection, the mod and the assignment over three later updates through
+/// <see cref="Advance"/> (BC-8); and <see cref="Confirm(IReadOnlySet{string}?, string, out bool)"/>
+/// confirms in two phases (BC-4). The <c>Redirects == 0</c> refusal is kept.</para>
 /// </summary>
 public sealed class HumanActorPenumbraStage
 {
@@ -172,6 +180,7 @@ public sealed class HumanActorPenumbraStage
     private readonly Action<string> log;
     private readonly string prefix;
     private Held? held;
+    private Pending? pending;
 
     public HumanActorPenumbraStage(IHumanActorPenumbra penumbra, Action<string> log, string prefix)
     {
@@ -191,6 +200,29 @@ public sealed class HumanActorPenumbraStage
     /// <summary>HV-3 only: the release described above. HV-2 leaves it false, so its release is unchanged.</summary>
     public bool ReleaseByDeletion { get; init; }
 
+    /// <summary>HV-5 (BC-9): the temporary mod's tag. HV-2 to HV-4 keep <see cref="Tag"/>.</summary>
+    public string ModTag { get; init; } = Tag;
+
+    /// <summary>HV-5 (BC-9): the temporary collection's name. HV-2 to HV-4 keep <see cref="CollectionName"/>.</summary>
+    public string TemporaryCollectionName { get; init; } = CollectionName;
+
+    /// <summary>
+    /// HV-5 (BC-3): the package and its manipulations, or why there are none,
+    /// in place of the player's current resources. Then the mod folder and the
+    /// player's resources and manipulations are not read. Null for HV-2 to HV-4.
+    /// </summary>
+    public Func<(HumanActorPenumbraPackage? Package, string? Meta, string? Refusal)>? PackageSource { get; init; }
+
+    /// <summary>
+    /// HV-5 (BC-8): <see cref="Apply"/> does steps 1 to 3 only, and
+    /// <see cref="Advance"/> then makes the collection, adds the mod and
+    /// assigns it, one step per call (per update). False for HV-2 to HV-4.
+    /// </summary>
+    public bool Split { get; init; }
+
+    /// <summary>HV-5: a split apply has steps still to run.</summary>
+    public bool Assigning => pending is not null;
+
     /// <summary>HV-3: Penumbra's cutscene parent for the actor reads back as −1 (read only). False when unread.</summary>
     public bool ParentDetached(int actorIndex) => Safe(() => penumbra.GetParent(actorIndex), null) == -1;
 
@@ -208,7 +240,7 @@ public sealed class HumanActorPenumbraStage
     /// </summary>
     public string? Apply(int actorIndex, int playerIndex, Func<string?>? beforeCollection = null)
     {
-        if (held is not null)
+        if (held is not null || pending is not null)
             return "a temporary collection is already held";
         if (!Available)
             return "Penumbra is unavailable or incompatible";
@@ -233,31 +265,100 @@ public sealed class HumanActorPenumbraStage
         if (beforeCollection?.Invoke() is { } refusedBefore)
             return refusedBefore;
 
-        // 3. The package: the player's resolved resources and manipulations, from a readable mod folder.
-        var modDirectory = Safe(() => penumbra.ModDirectory(), null);
-        if (!Safe(() => ModFolderReadable(modDirectory), false))
-            return "the Penumbra mod folder could not be read";
-        if (Safe(() => penumbra.ResourcePaths(playerIndex), null) is not { } resources)
-            return "the player's resource paths could not be read";
-        if (Safe(() => penumbra.MetaManipulations(playerIndex), null) is not { } meta)
-            return "the player's manipulations could not be read";
-        var (package, refusal) = HumanActorPenumbraPackage.Build(resources, modDirectory, Contained);
-        if (package is null)
-            return refusal;
+        // 3. The package: the player's resolved resources and manipulations, from a readable mod folder
+        // (HV-5: the entry's package and manipulations instead).
+        HumanActorPenumbraPackage package;
+        string meta;
+        if (PackageSource is { } source)
+        {
+            var (injected, injectedMeta, injectedRefusal) = Safe(source, (null, null, "the entry's package could not be read"));
+            if (injected is null || injectedMeta is null)
+                return injectedRefusal ?? "the entry's package could not be read";
+            package = injected;
+            meta = injectedMeta;
+        }
+        else
+        {
+            var modDirectory = Safe(() => penumbra.ModDirectory(), null);
+            if (!Safe(() => ModFolderReadable(modDirectory), false))
+                return "the Penumbra mod folder could not be read";
+            if (Safe(() => penumbra.ResourcePaths(playerIndex), null) is not { } resources)
+                return "the player's resource paths could not be read";
+            if (Safe(() => penumbra.MetaManipulations(playerIndex), null) is not { } playerMeta)
+                return "the player's manipulations could not be read";
+            var (built, refusal) = HumanActorPenumbraPackage.Build(resources, modDirectory, Contained);
+            if (built is null)
+                return refusal;
+            package = built;
+            meta = playerMeta;
+        }
         if (package.Redirects == 0)
             return $"the package has no redirect to a file beneath the mod folder ({package.Outside} left out), so nothing could be confirmed";
-        var paths = package.Paths;
+        var step = new Pending(actorIndex, playerIndex, player, parent.Value, package, meta);
+        if (Split)
+        {
+            pending = step;
+            log(prefix + $"Penumbra: parent {(parent == -1 ? "-1" : $"{parent}, now -1")}, package {package.Redirects} redirect(s), " +
+                $"{package.Swaps} swap(s); the collection, the mod and the assignment follow, one per update.");
+            return null;
+        }
 
-        // 4. The collection, its one mod, and the non-forced assignment.
-        if (Safe(() => penumbra.CreateTemporaryCollection(CollectionName), null) is not { } id || id == Guid.Empty)
+        // 4. The collection, its one mod, and the non-forced assignment; 5. only this actor.
+        return CreateCollection(step) ?? AddMod(step) ?? AssignOnly(step);
+    }
+
+    /// <summary>
+    /// HV-5 (BC-8), one step per call after a split <see cref="Apply"/>: the
+    /// collection, then the mod, then the assignment and its checks. The parent
+    /// must still read −1 before each. Null while in order;
+    /// <paramref name="done"/> is true once assigned. A refusal releases
+    /// anything made, and nothing further is pending.
+    /// </summary>
+    public string? Advance(out bool done)
+    {
+        done = false;
+        if (pending is not { } step)
+            return "no assignment is pending";
+        string? problem;
+        if (Safe(() => penumbra.GetParent(step.ActorIndex), null) != -1)
+            problem = held is null ? "the actor's Penumbra parent is no longer -1" : Undo("the actor's Penumbra parent is no longer -1");
+        else if (held is null)
+            problem = CreateCollection(step);
+        else if (!held.ModAdded)
+            problem = AddMod(step);
+        else
+        {
+            problem = AssignOnly(step);
+            done = problem is null;
+        }
+        if (problem is not null || done)
+            pending = null;
+        return problem;
+    }
+
+    private string? CreateCollection(Pending step)
+    {
+        if (Safe(() => penumbra.CreateTemporaryCollection(TemporaryCollectionName), null) is not { } id || id == Guid.Empty)
             return "no temporary collection id came back";
-        var holding = new Held(id, actorIndex, playerIndex, player, package);
-        held = holding;
-        if (!Safe(() => penumbra.AddTemporaryMod(Tag, id, paths, meta, Priority), false))
+        held = new Held(id, step.ActorIndex, step.PlayerIndex, step.Player, step.Package);
+        return null;
+    }
+
+    private string? AddMod(Pending step)
+    {
+        var holding = held!;
+        if (!Safe(() => penumbra.AddTemporaryMod(ModTag, holding.Collection, step.Package.Paths, step.Meta, Priority), false))
             return Undo("the temporary mod was refused");
         holding.ModAdded = true;
+        return null;
+    }
+
+    private string? AssignOnly(Pending step)
+    {
+        var holding = held!;
+        var id = holding.Collection;
         holding.AssignAttempted = true;
-        switch (Safe(() => penumbra.Assign(id, actorIndex), HumanAssignmentResult.Failed))
+        switch (Safe(() => penumbra.Assign(id, step.ActorIndex), HumanAssignmentResult.Failed))
         {
             case HumanAssignmentResult.Success:
                 break;
@@ -268,13 +369,14 @@ public sealed class HumanActorPenumbraStage
         }
 
         // 5. Only this actor.
-        if (Safe(() => penumbra.CollectionFor(playerIndex), null) != player)
+        if (Safe(() => penumbra.CollectionFor(step.PlayerIndex), null) != step.Player)
             return Undo("the player's collection changed with the assignment");
-        if (Safe(() => penumbra.CollectionFor(actorIndex), null) is not { ObjectValid: true } after || after.EffectiveCollection != id)
+        if (Safe(() => penumbra.CollectionFor(step.ActorIndex), null) is not { ObjectValid: true } after || after.EffectiveCollection != id)
             return Undo("the actor does not resolve to the temporary collection");
-        log(prefix + $"Penumbra: parent {(parent == -1 ? "-1" : $"{parent}, now -1")}, package {package.Redirects} redirect(s), " +
+        var package = step.Package;
+        log(prefix + $"Penumbra: parent {(step.Parent == -1 ? "-1" : $"{step.Parent}, now -1")}, package {package.Redirects} redirect(s), " +
             $"{package.Swaps} swap(s), {package.Vanilla} vanilla, {package.Outside} outside the mod folder left out, manipulations " +
-            $"{(meta.Length == 0 ? "none" : "yes")}; temporary collection assigned to this actor only, player's collection unchanged; " +
+            $"{(step.Meta.Length == 0 ? "none" : "yes")}; temporary collection assigned to this actor only, player's collection unchanged; " +
             "undrawing to rebuild under it.");
         return null;
     }
@@ -287,8 +389,19 @@ public sealed class HumanActorPenumbraStage
     /// them), so the caller may read again within a bounded window; every
     /// other refusal is final.
     /// </summary>
-    public string? Confirm(out bool settling)
+    public string? Confirm(out bool settling) => Confirm(null, "Penumbra confirmed", out settling);
+
+    /// <summary>
+    /// HV-5 (BC-4): <see cref="Confirm(out bool)"/> in two phases. With
+    /// <paramref name="required"/> (phase 1, before Glamourer), only those
+    /// packaged redirects must be reported yet; every packaged path the actor
+    /// reports must still resolve to the package. Without it (phase 2), every
+    /// packaged redirect must be reported. <paramref name="label"/> heads the
+    /// log line.
+    /// </summary>
+    public string? Confirm(IReadOnlySet<string>? required, string label, out bool settling)
     {
+        ArgumentNullException.ThrowIfNull(label);
         settling = false;
         if (held is not { } holding)
             return "no temporary collection is held";
@@ -323,25 +436,46 @@ public sealed class HumanActorPenumbraStage
                 }
             }
         }
-        int missingRedirects = 0, missingSwaps = 0;
+        int missingRedirects = 0, missingSwaps = 0, missingRequired = 0, deferred = 0;
         foreach (var (gamePath, source) in holding.Package.Paths)
         {
             if (seen.Contains(gamePath))
                 continue;
             if (AppearanceCapturePlanner.IsLocalFile(source))
+            {
                 missingRedirects++;
+                if (required is null || required.Contains(gamePath))
+                    missingRequired++;
+                else
+                    deferred++;
+            }
             else
+            {
                 missingSwaps++;
+            }
         }
         if (elsewhere > 0)
             return $"{elsewhere} packaged game path(s) resolved elsewhere after the redraw";
+        if (required is not null)
+        {
+            var requiredCount = holding.Package.Paths.Keys.Count(required.Contains);
+            if (missingRequired > 0)
+            {
+                settling = true;
+                return $"{missingRequired} of {requiredCount} required redirect(s) were not reported for the actor after the redraw";
+            }
+            log(prefix + $"{label}: {requiredCount} of {requiredCount} required redirect(s) reported, {seen.Count} of {holding.Package.Paths.Count} " +
+                $"packaged path(s) resolved to the package, 0 elsewhere, {deferred} redirect(s) not yet reported (checked again after Glamourer), " +
+                $"{missingSwaps} swap(s) not reported, {other} other redirect(s); parent -1, temporary collection effective, player's collection unchanged.");
+            return null;
+        }
         if (missingRedirects > 0)
         {
             settling = true;
             return $"{missingRedirects} of {holding.Package.Redirects} packaged redirect(s) were not reported for the actor after the redraw " +
                 $"({missingSwaps} swap(s) not reported)";
         }
-        log(prefix + $"Penumbra confirmed: {seen.Count} of {holding.Package.Paths.Count} packaged path(s) resolved to the package, 0 elsewhere, " +
+        log(prefix + $"{label}: {seen.Count} of {holding.Package.Paths.Count} packaged path(s) resolved to the package, 0 elsewhere, " +
             $"0 redirect(s) missing, {missingSwaps} swap(s) not reported, {other} other redirect(s); parent -1, temporary collection effective, " +
             "player's collection unchanged.");
         return null;
@@ -357,12 +491,13 @@ public sealed class HumanActorPenumbraStage
     /// </summary>
     public string? Release(int actorIndex)
     {
+        pending = null;
         if (held is not { } holding)
             return null;
         held = null;
         if (ReleaseByDeletion && holding.AssignAttempted && MayResolve(holding, actorIndex) is var assigned and not AssignmentReading.No)
             return ReleaseWithCollection(holding, actorIndex, assigned == AssignmentReading.Yes);
-        var removal = Safe(() => penumbra.RemoveTemporaryMod(Tag, holding.Collection, Priority), HumanModRemoval.Failed);
+        var removal = Safe(() => penumbra.RemoveTemporaryMod(ModTag, holding.Collection, Priority), HumanModRemoval.Failed);
         var modRemoved = removal == HumanModRemoval.Removed || (!holding.ModAdded && removal == HumanModRemoval.NotPresent);
         var deleted = Safe(() => penumbra.DeleteTemporaryCollection(holding.Collection), false);
         string actorOff = "not read";
@@ -450,6 +585,9 @@ public sealed class HumanActorPenumbraStage
             return fallback;
         }
     }
+
+    private sealed record Pending(
+        int ActorIndex, int PlayerIndex, HumanCollectionReading Player, int Parent, HumanActorPenumbraPackage Package, string Meta);
 
     private sealed class Held(Guid collection, int actorIndex, int playerIndex, HumanCollectionReading player, HumanActorPenumbraPackage package)
     {

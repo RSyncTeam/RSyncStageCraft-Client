@@ -300,6 +300,24 @@ internal sealed unsafe class HumanPuppetNativeBackend : IHumanPuppetBackend
     }
 
     /// <summary>
+    /// HV-5 M2 r2 (U-4), read only: the address of the object's human draw
+    /// object, or 0 when it has none. Compared only, never dereferenced by the
+    /// caller.
+    /// </summary>
+    internal static nint HumanDrawObject(nint address)
+    {
+        try
+        {
+            var gameObject = (GameObjectStruct*)address;
+            return gameObject != null && IsHumanDrawObject(gameObject) ? (nint)gameObject->DrawObject : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
     /// R-6, read only: for each partial skeleton of the object's human draw
     /// object, the hashed resource file name, the bone count, and hashes of the
     /// bone names, parent indices and reference pose. No path or binary data.

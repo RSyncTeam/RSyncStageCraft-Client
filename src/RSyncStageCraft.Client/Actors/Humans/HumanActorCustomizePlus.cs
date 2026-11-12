@@ -86,6 +86,12 @@ public enum HumanCustomizePlusState
 /// </list>
 /// The owner fingerprint cannot detect temporary profiles; it shows only that
 /// the owner's normal profiles did not change.
+/// <para>HV-5 M2 (BC-2): the detach runs for every HV-5 spawn. With
+/// <see cref="AllowAbsent"/>, a Customize+ that is not loaded at the detach
+/// is recorded instead of refused: there is then no copy-parent table to
+/// clear, nothing is applied, and <see cref="StillDetached"/> refuses once
+/// any plugin has loaded or unloaded since (the actor is then halted). A
+/// loaded Customize+ is gated and detached exactly as for HV-4.</para>
 /// </summary>
 public sealed class HumanActorCustomizePlusStage
 {
@@ -125,6 +131,12 @@ public sealed class HumanActorCustomizePlusStage
 
     public HumanCustomizePlusState State { get; private set; }
 
+    /// <summary>HV-5 only: a Customize+ that is not loaded at the detach is recorded, not refused. False for HV-4.</summary>
+    public bool AllowAbsent { get; init; }
+
+    /// <summary>HV-5: Customize+ was not loaded at this spawn's detach (only with <see cref="AllowAbsent"/>).</summary>
+    public bool Absent { get; private set; }
+
     /// <summary>Profiles this load deleted by their receipt.</summary>
     public int RemovedProfiles { get; private set; }
 
@@ -150,6 +162,16 @@ public sealed class HumanActorCustomizePlusStage
             detached = false;
             receipt = Guid.Empty;
             ownerBefore = null;
+            Absent = false;
+            if (AllowAbsent && NotLoaded() is { } absent)
+            {
+                if (absent.Length > 0)
+                    return "customize+: " + absent;
+                Absent = true;
+                log(prefix + "customize+: not loaded; no copy-parent entry to clear; nothing is applied, and the actor is halted if " +
+                    "any plugin loads or unloads before it is shown or while it exists.");
+                return null;
+            }
             if (Gate() is { } refused)
                 return "customize+: " + refused;
             int parent;
@@ -178,6 +200,23 @@ public sealed class HumanActorCustomizePlusStage
             busy = false;
         }
     }
+
+    /// <summary>
+    /// HV-5, read only, before the show and on every update after it: null
+    /// while no plugin has loaded or unloaded since the detach and, with a
+    /// loaded Customize+, the actor's parent still reads −1; otherwise why not.
+    /// </summary>
+    public string? StillDetached(int objectIndex)
+    {
+        if (Changed() is { } changed)
+            return "customize+: " + changed;
+        if (Absent)
+            return null;
+        return detached && ParentDetached(objectIndex) ? null : "customize+: the actor's Customize+ parent does not read -1";
+    }
+
+    /// <summary>HV-5, read only, on every update while the actor exists: null while no plugin has loaded or unloaded since the detach.</summary>
+    public string? PluginsUnchanged() => Changed() is { } changed ? "customize+: " + changed : null;
 
     /// <summary>True when the actor's Customize+ parent reads −1 (read only, total).</summary>
     public bool ParentDetached(int objectIndex)
@@ -265,9 +304,10 @@ public sealed class HumanActorCustomizePlusStage
             switch (State)
             {
                 case HumanCustomizePlusState.None:
-                    if (detached)
+                    if (detached || Absent)
                         log(prefix + "customize+ cleanup: nothing applied; no Customize+ profile requested by RSC.");
                     detached = false;
+                    Absent = false;
                     return null;
                 case HumanCustomizePlusState.Uncertain:
                     // Owner decision D4: owning the actor does not prove owning whichever profile targets it.
@@ -356,6 +396,26 @@ public sealed class HumanActorCustomizePlusStage
         }
         log(prefix + "customize+ finding: the owner's normal profiles changed between the apply and the removal; nothing corrected.");
         return "customize+ finding: the owner's normal profiles changed";
+    }
+
+    /// <summary>
+    /// HV-5: null when Customize+ is loaded; an empty text when it is not
+    /// (the generation is then recorded); otherwise why the plugin list could
+    /// not be read.
+    /// </summary>
+    private string? NotLoaded()
+    {
+        try
+        {
+            if (customizePlus.PluginVersion is not null)
+                return null;
+            generation = customizePlus.Generation;
+            return string.Empty;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            return $"the plugin list could not be read ({exception.GetType().Name})";
+        }
     }
 
     private string? Gate()
