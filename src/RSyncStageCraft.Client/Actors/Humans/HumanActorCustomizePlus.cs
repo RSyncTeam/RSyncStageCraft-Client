@@ -44,6 +44,17 @@ public interface IHumanActorCustomizePlus
     string OwnerProfiles();
 }
 
+/// <summary>
+/// HV-5 M3 (BC-6): an injected payload for the one temporary profile, in
+/// place of the fixed test scale: the entry's canonical profile text and the
+/// log line's description (counts only: no bone name and no value).
+/// </summary>
+public sealed record HumanCustomizePlusPayload(string Json, string Description)
+{
+    /// <summary>Never the payload.</summary>
+    public override string ToString() => "Customize+ payload";
+}
+
 /// <summary>Where HV-4's one temporary profile stands.</summary>
 public enum HumanCustomizePlusState
 {
@@ -231,8 +242,14 @@ public sealed class HumanActorCustomizePlusStage
         }
     }
 
-    /// <summary>Step 3: null when applied with a new receipt; otherwise why not (the state is then None, Uncertain or Applied).</summary>
-    public string? Apply(int objectIndex, string? unowned)
+    /// <summary>
+    /// Step 3: null when applied with a new receipt; otherwise why not (the
+    /// state is then None, Uncertain or Applied). With no
+    /// <paramref name="payload"/>, the fixed <see cref="PayloadJson"/> (HV-4
+    /// and D14); with one (HV-5 M3), its text, by the same single call, the
+    /// same receipt and the same removal.
+    /// </summary>
+    public string? Apply(int objectIndex, string? unowned, HumanCustomizePlusPayload? payload = null)
     {
         if (Enter() is { } reentered)
             return "customize+: " + reentered;
@@ -240,6 +257,8 @@ public sealed class HumanActorCustomizePlusStage
         {
             if (State != HumanCustomizePlusState.None || !detached || objectIndex is < 0 or > ushort.MaxValue)
                 return "customize+: the apply is not in order";
+            if (payload is not null && (string.IsNullOrEmpty(payload.Json) || payload.Description is null))
+                return "customize+: the entry's profile is missing";
             if (unowned is not null)
                 return "customize+: " + unowned;
             if (Changed() is { } changed)
@@ -258,7 +277,7 @@ public sealed class HumanActorCustomizePlusStage
             (int Code, Guid? Profile) answer;
             try
             {
-                answer = customizePlus.SetTemporaryProfile((ushort)objectIndex, PayloadJson);
+                answer = customizePlus.SetTemporaryProfile((ushort)objectIndex, payload?.Json ?? PayloadJson);
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
@@ -280,7 +299,9 @@ public sealed class HumanActorCustomizePlusStage
             State = HumanCustomizePlusState.Applied;
             if (!ParentDetached(objectIndex))
                 return "customize+: the actor's Customize+ parent no longer reads -1 after the apply";
-            log(prefix + $"customize+: temporary profile Success, receipt {Tag(receipt)}; parent -1; " +
+            log(prefix + (payload is null
+                ? $"customize+: temporary profile Success, receipt {Tag(receipt)}; parent -1; "
+                : $"customize+: entry profile applied, receipt {Tag(receipt)}, {payload.Description}; parent -1; ") +
                 "owner's normal profiles read (temporary profiles cannot be read).");
             return null;
         }

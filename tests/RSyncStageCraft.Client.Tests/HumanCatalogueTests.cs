@@ -552,6 +552,193 @@ public sealed class HumanCatalogueTests : IDisposable
             Assert.False(HumanCatalogueEntryCodec.IsStoredGamePath(bad), bad);
     }
 
+    // ---------- HV-5 M3: the owner-approved Customize+ profile ----------
+
+    /// <summary>The read with a comparable skeleton summary and the synthetic profile, as the flag's read gives it.</summary>
+    private static HumanCatalogueRead WithProfile(HumanCatalogueRead read, string json = ProfileSample.Json) =>
+        read with
+        {
+            SkeletonSummary = HumanCatalogueFixture.Summary, Profile = ProfileSample.Read(json),
+            Versions = read.Versions with { CustomizePlus = HumanActorCustomizePlusStage.RequiredVersion },
+        };
+
+    [Fact]
+    public async Task ACaptureWithTheFlagStoresTheCanonicalProfileInANewEntryBesideAnUnchangedOne()
+    {
+        var store = new HumanCatalogueStore(catalogue);
+        var plain = FullRead();
+        var first = (await HumanCatalogueCapture.CaptureAsync("Rsc One", store, Reads(plain, plain), () => Now, CancellationToken.None)).Entry!;
+        var firstFile = Path.Combine(catalogue, "entries", first.EntryId.ToString("N") + ".json");
+        var firstBytes = File.ReadAllBytes(firstFile);
+        var read = WithProfile(plain);
+
+        var result = await HumanCatalogueCapture.CaptureAsync("Rsc One CP", store, Reads(read, read), () => Now, CancellationToken.None, withProfile: true);
+
+        Assert.Null(result.Refusal);
+        var entry = result.Entry!;
+        Assert.Equal(HumanCatalogueEntry.ProfileFormat, entry.Format);
+        Assert.Equal(HumanCatalogueEntry.OwnerApproved, entry.ProfileSource);
+        Assert.Equal(read.Profile!.Profile, entry.Profile);
+        Assert.Equal(HumanCatalogueEntry.HashOf(entry.Profile!), entry.ProfileHash);
+        Assert.Equal(ProfileSample.Counts, entry.ProfileCounts);
+        // The same files: shared, none stored again.
+        Assert.Contains(result.Lines, line => line.StartsWith($"files {entry.Counts.Files} (0 new, {entry.Counts.Files} already stored)", StringComparison.Ordinal));
+        Assert.Equal("profile: owner-approved (active), id 5a17c0de, 3 bone(s) (2 base, 0 other partial, 1 absent); stored, no name " +
+            "(temporary profiles, the editor and the global default profile cannot be read)", result.Lines[^1]);
+        Assert.DoesNotContain(result.Lines, line => line.Contains("j_kosi", StringComparison.Ordinal));
+        // The entry without a profile is byte-identical.
+        Assert.Equal(firstBytes, File.ReadAllBytes(firstFile));
+
+        // Stored: M1's fields and the three profile fields only; no id, its hash, a name, a world or a priority.
+        var text = File.ReadAllText(Path.Combine(catalogue, "entries", entry.EntryId.ToString("N") + ".json"));
+        using var document = JsonDocument.Parse(text);
+        Assert.Equal(EntryFields.Concat(new[] { "profile", "profileCounts", "profileHash" }).Order(StringComparer.Ordinal),
+            document.RootElement.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal));
+        Assert.Equal(new[] { "absent", "base", "bones", "other" },
+            document.RootElement.GetProperty("profileCounts").EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal));
+        using var profile = JsonDocument.Parse(document.RootElement.GetProperty("profile").GetString()!);
+        Assert.Equal("Bones", Assert.Single(profile.RootElement.EnumerateObject()).Name);
+        Assert.DoesNotContain(FakeProfileReads.Tag, text, StringComparison.Ordinal);
+        foreach (var never in new[] { "Name\"", "Character", "World", "Priority", "Template", "UniqueId", "Guid" })
+            Assert.DoesNotContain(never, text, StringComparison.OrdinalIgnoreCase);
+
+        // Read back exactly, and listed with its bone count; the entry without a profile lists none.
+        var parsed = HumanCatalogueEntryCodec.TryParse(File.ReadAllBytes(Path.Combine(catalogue, "entries", entry.EntryId.ToString("N") + ".json")), out var problem);
+        Assert.True(parsed is not null, problem);
+        Assert.Equal(entry.Profile, parsed!.Profile);
+        Assert.Equal(entry.ProfileCounts, parsed.ProfileCounts);
+        Assert.Equal(HumanCatalogueEntryCodec.Serialize(entry), HumanCatalogueEntryCodec.Serialize(parsed));
+        var list = store.List();
+        Assert.Equal(0, list.UnreadableEntries);
+        Assert.Null(list.Entries.Single(listing => listing.Label == "Rsc One").ProfileBones);
+        Assert.Equal(3, list.Entries.Single(listing => listing.Label == "Rsc One CP").ProfileBones);
+    }
+
+    [Fact]
+    public async Task AnEntryWithoutAProfileIsWrittenAndReadExactlyAsBefore()
+    {
+        var store = new HumanCatalogueStore(catalogue);
+        var read = FullRead();
+        var entry = (await HumanCatalogueCapture.CaptureAsync("Rsc One", store, Reads(read, read), () => Now, CancellationToken.None)).Entry!;
+        var bytes = File.ReadAllBytes(Assert.Single(Directory.EnumerateFiles(Path.Combine(catalogue, "entries"))));
+
+        var parsed = HumanCatalogueEntryCodec.TryParse(bytes, out var problem);
+
+        Assert.True(parsed is not null, problem);
+        Assert.Equal(HumanCatalogueEntry.CurrentFormat, parsed!.Format);
+        Assert.Null(parsed.Profile);
+        Assert.Null(parsed.ProfileHash);
+        Assert.Null(parsed.ProfileCounts);
+        Assert.Equal(bytes, HumanCatalogueEntryCodec.Serialize(parsed));
+        Assert.Equal(bytes, HumanCatalogueEntryCodec.Serialize(entry));
+        Assert.DoesNotContain("\"profile\"", Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+        Assert.Null(Assert.Single(store.List().Entries).ProfileBones);
+    }
+
+    [Fact]
+    public async Task TheFlagWithoutAProfileReadAndAProfileReadWithoutTheFlagAreBothRefusedBeforeAnyCopy()
+    {
+        var store = new HumanCatalogueStore(catalogue);
+        var plain = FullRead();
+        var read = WithProfile(plain);
+
+        var missing = await HumanCatalogueCapture.CaptureAsync("Rsc One CP", store, Reads(plain, plain), () => Now, CancellationToken.None, withProfile: true);
+        var unasked = await HumanCatalogueCapture.CaptureAsync("Rsc One CP", store, Reads(read, read), () => Now, CancellationToken.None);
+
+        Assert.Equal("the Customize+ profile was not read", missing.Refusal);
+        Assert.Equal("a Customize+ profile was read without the flag", unasked.Refusal);
+        Assert.False(Directory.Exists(Path.Combine(catalogue, "blobs")) && Directory.EnumerateFiles(Path.Combine(catalogue, "blobs")).Any());
+        Assert.False(Directory.Exists(Path.Combine(catalogue, "entries")) && Directory.EnumerateFiles(Path.Combine(catalogue, "entries")).Any());
+    }
+
+    [Theory]
+    [InlineData("changed")]
+    [InlineData("lost")]
+    public async Task AProfileThatChangesOrIsLostBetweenTheTwoReadsRefusesTheEntry(string how)
+    {
+        var store = new HumanCatalogueStore(catalogue);
+        var plain = FullRead();
+        var read = WithProfile(plain);
+        var again = how == "changed"
+            ? WithProfile(plain, ProfileSample.Json.Replace("1.05", "1.06", StringComparison.Ordinal))
+            : read with { Profile = null };
+
+        var result = await HumanCatalogueCapture.CaptureAsync("Rsc One CP", store, Reads(read, again), () => Now, CancellationToken.None, withProfile: true);
+
+        Assert.Null(result.Entry);
+        Assert.Equal(how == "changed" ? "the appearance changed during the capture" : "the Customize+ profile was not read", result.Refusal);
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(catalogue, "entries")));
+    }
+
+    [Fact]
+    public async Task AProfileNeedsAComparableSkeletonSummaryAndAConsistentRead()
+    {
+        var store = new HumanCatalogueStore(catalogue);
+        var plain = FullRead();
+        var uncomparable = WithProfile(plain) with { SkeletonSummary = plain.SkeletonSummary };
+        var good = WithProfile(plain);
+        var inconsistent = good with { Profile = good.Profile! with { ProfileHash = new string('0', 64) } };
+        var unversioned = good with { Versions = good.Versions with { CustomizePlus = null } };
+
+        Assert.Equal("the Customize+ profile needs a skeleton summary the spawn can compare",
+            (await HumanCatalogueCapture.CaptureAsync("Rsc One CP", store, Reads(uncomparable), () => Now, CancellationToken.None, withProfile: true)).Refusal);
+        Assert.Equal("the Customize+ profile read is not consistent",
+            (await HumanCatalogueCapture.CaptureAsync("Rsc One CP", store, Reads(inconsistent), () => Now, CancellationToken.None, withProfile: true)).Refusal);
+        Assert.Equal("the Customize+ profile needs Customize+ 2.2.1.3 recorded",
+            (await HumanCatalogueCapture.CaptureAsync("Rsc One CP", store, Reads(unversioned), () => Now, CancellationToken.None, withProfile: true)).Refusal);
+    }
+
+    [Fact]
+    public async Task AProfileEntryWithAChangedFieldIsRefusedOnRead()
+    {
+        var store = new HumanCatalogueStore(catalogue);
+        var read = WithProfile(FullRead());
+        var entry = (await HumanCatalogueCapture.CaptureAsync("Rsc One CP", store, Reads(read, read), () => Now, CancellationToken.None, withProfile: true)).Entry!;
+        Assert.Null(HumanCatalogueEntryCodec.Problem(entry));
+
+        foreach (var (tampered, why) in new[]
+        {
+            (entry with { Format = "hv5-local-3" }, "unknown format"),
+            (entry with { Versions = entry.Versions with { CustomizePlus = null } }, "a profile needs Customize+ 2.2.1.3 recorded"),
+            (entry with { Format = HumanCatalogueEntry.CurrentFormat }, "unknown profile source"),
+            (entry with { Format = HumanCatalogueEntry.CurrentFormat, ProfileSource = HumanCatalogueEntry.NoProfile }, "a profile in an entry without one"),
+            (entry with { ProfileSource = HumanCatalogueEntry.NoProfile }, "unknown profile source"),
+            (entry with { Profile = ProfileSample.Json, ProfileHash = HumanCatalogueEntry.HashOf(ProfileSample.Json) }, "invalid profile"),
+            (entry with { Profile = null }, "invalid profile"),
+            (entry with { ProfileHash = new string('0', 64) }, "invalid profile"),
+            (entry with { ProfileCounts = null }, "invalid profile counts"),
+            (entry with { ProfileCounts = entry.ProfileCounts! with { Bones = 4 } }, "invalid profile counts"),
+            (entry with { ProfileCounts = entry.ProfileCounts! with { Base = 3 } }, "invalid profile counts"),
+            (entry with { ProfileCounts = new HumanCatalogueProfileCounts(3, 0, 0, 3) }, "invalid profile counts"),
+            (entry with { SkeletonSummary = ["skeleton partials: 1", "skeleton 0: file 0000000000000000, bones 100"] },
+                "a profile needs a comparable skeleton summary"),
+        })
+        {
+            Assert.Equal(why, HumanCatalogueEntryCodec.Problem(tampered));
+            Assert.Throws<ArgumentException>(() => HumanCatalogueEntryCodec.Serialize(tampered));
+        }
+    }
+
+    [Theory]
+    [InlineData("capture Rsc One", true, "Rsc One", false)]
+    [InlineData("capture Rsc One CP with-customize+", true, "Rsc One CP", true)]
+    [InlineData("capture Rsc One with-customize", true, "Rsc One with-customize", false)]
+    [InlineData("capture with-customize+", true, "with-customize+", false)]
+    [InlineData("capture  with-customize+", false, "", true)]
+    [InlineData("capture ", false, "", false)]
+    [InlineData("capture", false, "", false)]
+    [InlineData("list", false, "", false)]
+    [InlineData("spawn Rsc One", false, "", false)]
+    public void TheCaptureStepTakesTheFlagOnlyAsItsLastWord(string step, bool parsed, string label, bool withProfile)
+    {
+        Assert.Equal(parsed, HumanCatalogueCaptureCommand.TryParse(step, out var foundLabel, out var foundFlag));
+        Assert.Equal(label, foundLabel);
+        Assert.Equal(withProfile, foundFlag);
+    }
+
+    [Fact]
+    public void TheFlagCannotBePartOfALabel() => Assert.Null(HumanCatalogueLabel.Normalize("with-customize+", out _));
+
     // ---------- helpers ----------
 
     private static readonly string[] EntryFields =

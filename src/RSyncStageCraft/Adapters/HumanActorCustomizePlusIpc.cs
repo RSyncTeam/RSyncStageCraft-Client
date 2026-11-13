@@ -15,13 +15,17 @@ namespace RSyncStageCraft.Adapters;
 /// <c>Profile.SetTemporaryProfileOnCharacter</c>,
 /// <c>Profile.DeleteTemporaryProfileByUniqueId</c>, and the reads
 /// <c>Profile.GetActiveProfileIdOnCharacter</c> and <c>Profile.GetList</c>.
+/// HV-5 M3 (owner decision D-M3-2) adds one read, <c>Profile.GetByUniqueId</c>,
+/// called only inside <see cref="ActiveProfile"/> and only with the id the
+/// active-profile read returned in that same call; no member takes an id, and
+/// the id leaves this class only as a short hash.
 /// Nothing here deletes by object index, edits a persistent profile, template,
 /// priority or character, or subscribes to a Customize+ event. The installed
 /// version comes from Dalamud's plugin list (read only); the generation is the
 /// runner's. Calls throw when Customize+ does not answer: the stage decides
 /// what that means. Game thread only.
 /// </summary>
-internal sealed class HumanActorCustomizePlusIpc : IHumanActorCustomizePlus
+internal sealed class HumanActorCustomizePlusIpc : IHumanActorCustomizePlus, IHumanCatalogueProfileReads
 {
     internal const string InternalName = "CustomizePlus";
 
@@ -34,6 +38,7 @@ internal sealed class HumanActorCustomizePlusIpc : IHumanActorCustomizePlus
     private readonly ICallGateSubscriber<ushort, string, (int, Guid?)> setTemporary;
     private readonly ICallGateSubscriber<Guid, int> deleteTemporary;
     private readonly ICallGateSubscriber<ushort, (int, Guid?)> activeProfile;
+    private readonly ICallGateSubscriber<Guid, (int, string?)> profileContent;
     private readonly ICallGateSubscriber<IList<(Guid, string, string, List<(string, ushort, byte, ushort)>, int, bool)>> profiles;
 
     internal HumanActorCustomizePlusIpc(IDalamudPluginInterface pluginInterface, Func<long> generation)
@@ -47,6 +52,7 @@ internal sealed class HumanActorCustomizePlusIpc : IHumanActorCustomizePlus
         setTemporary = pluginInterface.GetIpcSubscriber<ushort, string, (int, Guid?)>("CustomizePlus.Profile.SetTemporaryProfileOnCharacter");
         deleteTemporary = pluginInterface.GetIpcSubscriber<Guid, int>("CustomizePlus.Profile.DeleteTemporaryProfileByUniqueId");
         activeProfile = pluginInterface.GetIpcSubscriber<ushort, (int, Guid?)>("CustomizePlus.Profile.GetActiveProfileIdOnCharacter");
+        profileContent = pluginInterface.GetIpcSubscriber<Guid, (int, string?)>("CustomizePlus.Profile.GetByUniqueId");
         profiles = pluginInterface.GetIpcSubscriber<IList<(Guid, string, string, List<(string, ushort, byte, ushort)>, int, bool)>>(
             "CustomizePlus.Profile.GetList");
     }
@@ -96,6 +102,21 @@ internal sealed class HumanActorCustomizePlusIpc : IHumanActorCustomizePlus
             string.Join(";", entry.Item4.Select(character => $"{character.Item1}/{character.Item2}/{character.Item3}/{character.Item4}")) +
             $"|{entry.Item5}|{entry.Item6}"));
         return $"active {code}:{Hash((active ?? Guid.Empty).ToString("N"))}; list {list.Count}:{Hash(lines)}";
+    }
+
+    /// <summary>
+    /// HV-5 M3, read only: the character's active normal profile, then its
+    /// content for that id only. The id is returned as 8 hex characters of
+    /// its SHA-256, never in clear; the content read is skipped unless the
+    /// first read answered Success with a non-empty id.
+    /// </summary>
+    public HumanCatalogueProfileAnswer ActiveProfile(ushort objectIndex)
+    {
+        var (code, id) = activeProfile.InvokeFunc(objectIndex);
+        if (code != HumanActorCustomizePlusStage.Success || id is not { } active || active == Guid.Empty)
+            return new HumanCatalogueProfileAnswer(code, null, null, null);
+        var (contentCode, json) = profileContent.InvokeFunc(active);
+        return new HumanCatalogueProfileAnswer(code, Hash(active.ToString("N"))[..8], contentCode, json);
     }
 
     private static string Hash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..16].ToLowerInvariant();

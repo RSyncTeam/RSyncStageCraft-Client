@@ -19,7 +19,11 @@ namespace RSyncStageCraft;
 /// <item><c>capture &lt;label&gt;</c>: reads the owner's own character, read
 /// only (capture reads C1 to C7 and C9), stores its files and one immutable
 /// entry in the local catalogue, and re-checks the character afterwards.
-/// No Customize+ profile is read (C8 is M3, decision D2).</item>
+/// No Customize+ profile is read.</item>
+/// <item>HV-5 M3: <c>capture &lt;label&gt; with-customize+</c>: the same, plus
+/// C8, the normal Customize+ profile active on the owner's character (owner
+/// decision D2), read only (<see cref="HumanCatalogueProfileReader"/>), and
+/// stored in a new entry of format <c>hv5-local-2</c>.</item>
 /// <item><c>list</c>: the catalogue's entries, by label and short id, with
 /// counts, completeness and versions; no path.</item>
 /// <item>HV-5 M2: <c>spawn &lt;label&gt;</c>, <c>spawn-test-scale &lt;label&gt;</c>, <c>remove</c> and
@@ -60,6 +64,7 @@ internal sealed class HumanCatalogueRun
     private readonly DalamudAppearancePlayerLocator locator;
     private readonly HumanActorPenumbraIpc penumbra;
     private readonly HumanActorGlamourerIpc glamourer;
+    private readonly HumanActorCustomizePlusIpc customizePlus;
     private readonly Func<int> otherRscActors;
     private readonly HumanCatalogueSpawnRun spawn;
     private readonly string? journalRefusal;
@@ -116,6 +121,8 @@ internal sealed class HumanCatalogueRun
         penumbra = new HumanActorPenumbraIpc(pluginInterface);
         // The generation is unused here: HV-5 M1 only reads the player's state.
         glamourer = new HumanActorGlamourerIpc(pluginInterface, () => 0);
+        // HV-5 M3: the capture's Customize+ reads only (the gate, the active profile and its content, the fingerprint); the generation is unused here.
+        customizePlus = new HumanActorCustomizePlusIpc(pluginInterface, () => 0);
         spawn = new HumanCatalogueSpawnRun(pluginInterface, framework, data, playerState, SpawnSceneExit, Store, CurrentVersions, catalogueRoot,
             process, log);
         commandAdded = commands.AddHandler(Command, new CommandInfo(OnCommand)
@@ -124,7 +131,8 @@ internal sealed class HumanCatalogueRun
             ShowInHelp = false,
         });
         log(commandAdded
-            ? $"RSC HV-5 runner loaded. Steps, typed only in the Dalamud log window's console: {Command} capture <label>, {Command} list, " +
+            ? $"RSC HV-5 runner loaded. Steps, typed only in the Dalamud log window's console: {Command} capture <label>, " +
+                $"{Command} capture <label> with-customize+, {Command} list, " +
                 $"{Command} spawn <label>, {Command} spawn-test-scale <label>, {Command} remove, {Command} status."
             : "RSC HV-5 runner loaded without its command; no step can run.");
         if (journalRefusal is not null)
@@ -173,7 +181,7 @@ internal sealed class HumanCatalogueRun
             return;
         }
         var spawnStep = HumanCatalogueSpawnCommand.TryParse(chosen, out _, out _);
-        if (chosen.StartsWith("capture ", StringComparison.Ordinal) && spawn.Busy)
+        if (HumanCatalogueCaptureCommand.TryParse(chosen, out _, out _) && spawn.Busy)
         {
             log("RSC HV-5 refused: a spawn is being prepared, an actor exists, or stored files are held; capture after the removal.");
             return;
@@ -191,7 +199,7 @@ internal sealed class HumanCatalogueRun
         var token = stopping.Token;
         var task = chosen == "list"
             ? Task.Run(() => List(), token)
-            : Task.Run(() => CaptureAsync(chosen["capture ".Length..], token), token);
+            : Task.Run(() => CaptureAsync(chosen, token), token);
         lock (gate)
             running = task;
     }
@@ -243,12 +251,11 @@ internal sealed class HumanCatalogueRun
         string step;
         if (text is "list" or "remove" or "status")
             step = text;
-        else if ((text.StartsWith("capture ", StringComparison.Ordinal) && text.Length > "capture ".Length) ||
-                 HumanCatalogueSpawnCommand.TryParse(text, out _, out _))
+        else if (HumanCatalogueCaptureCommand.TryParse(text, out _, out _) || HumanCatalogueSpawnCommand.TryParse(text, out _, out _))
             step = text;
         else
         {
-            log($"RSC HV-5 unknown step; use {Command} capture <label>, {Command} list, {Command} spawn <label>, " +
+            log($"RSC HV-5 unknown step; use {Command} capture <label>, {Command} capture <label> with-customize+, {Command} list, {Command} spawn <label>, " +
                 $"{Command} spawn-test-scale <label>, {Command} remove, or {Command} status.");
             return;
         }
@@ -289,7 +296,9 @@ internal sealed class HumanCatalogueRun
                     $"{entry.Bytes} byte(s), {entry.Outside} outside the mod folder left out, {(entry.Complete ? "complete" : "INCOMPLETE")}, " +
                     (entry.Skeleton is { } group ? $"skeleton c{group.RaceCode:D4} ({group.Members.Count}, deformer {(group.Deformer ? "yes" : "no")})" : "no skeleton group") +
                     $", game {entry.Versions.Game ?? "unknown"}, Penumbra {entry.Versions.Penumbra ?? "unknown"}, Glamourer {entry.Versions.Glamourer ?? "unknown"}, " +
-                    $"Customize+ {entry.Versions.CustomizePlus ?? "not installed"}.");
+                    $"Customize+ {entry.Versions.CustomizePlus ?? "not installed"}" +
+                    // HV-5 M3: only an entry with a profile gets this; an entry without one keeps its line exactly as before.
+                    (entry.ProfileBones is { } bones ? $", profile owner-approved ({bones} bone(s))." : "."));
             }
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -299,12 +308,13 @@ internal sealed class HumanCatalogueRun
         }
     }
 
-    private async Task CaptureAsync(string label, CancellationToken cancellationToken)
+    private async Task CaptureAsync(string step, CancellationToken cancellationToken)
     {
         try
         {
-            var result = await HumanCatalogueCapture.CaptureAsync(label, Store(), ReadAsync, () => DateTimeOffset.UtcNow, cancellationToken)
-                .ConfigureAwait(false);
+            HumanCatalogueCaptureCommand.TryParse(step, out var label, out var withProfile);
+            var result = await HumanCatalogueCapture.CaptureAsync(label, Store(), token => ReadAsync(withProfile, token), () => DateTimeOffset.UtcNow,
+                cancellationToken, withProfile).ConfigureAwait(false);
             if (result.Entry is null)
             {
                 Say($"RSC HV-5 capture refused: {result.Refusal}. No entry was written.");
@@ -325,20 +335,22 @@ internal sealed class HumanCatalogueRun
     }
 
     /// <summary>One read, on the framework thread, in one framework call.</summary>
-    private async Task<HumanCatalogueReadResult> ReadAsync(CancellationToken cancellationToken)
+    private async Task<HumanCatalogueReadResult> ReadAsync(bool withProfile, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (shutDown)
             return HumanCatalogueReadResult.Refused("the plugin is unloading");
-        return await framework.RunOnFrameworkThread<HumanCatalogueReadResult>(ReadOnFramework).ConfigureAwait(false);
+        return await framework.RunOnFrameworkThread<HumanCatalogueReadResult>(() => ReadOnFramework(withProfile)).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Framework thread. The player is re-checked as the exact same object
     /// before and after every read; any change refuses the read. Nothing is
-    /// written to the game or to any plugin.
+    /// written to the game or to any plugin. HV-5 M3: with
+    /// <paramref name="withProfile"/>, the Customize+ profile is read last, in
+    /// the same call, with the skeleton's bone names (memory only).
     /// </summary>
-    private HumanCatalogueReadResult ReadOnFramework()
+    private HumanCatalogueReadResult ReadOnFramework(bool withProfile)
     {
         if (shutDown)
             return HumanCatalogueReadResult.Refused("the plugin is unloading");
@@ -401,9 +413,23 @@ internal sealed class HumanCatalogueRun
                 .ToList();
             if (!locator.IsStill(player))
                 return HumanCatalogueReadResult.Refused(changed);
+            HumanCatalogueProfileRead? profile = null;
+            if (withProfile)
+            {
+                // D2 and D-M3-2: the active normal profile on this object, and only its content; the bone names classify it and are dropped.
+                var bones = HumanPuppetNativeBackend.SkeletonBoneNames(player.Address);
+                if (!locator.IsStill(player))
+                    return HumanCatalogueReadResult.Refused(changed);
+                var (profileRead, refusal) = HumanCatalogueProfileReader.Read(customizePlus, player.ObjectIndex, bones, summary);
+                if (profileRead is null)
+                    return HumanCatalogueReadResult.Refused(refusal ?? "Customize+ profile: not read");
+                if (!locator.IsStill(player))
+                    return HumanCatalogueReadResult.Refused(changed);
+                profile = profileRead;
+            }
             var versions = CurrentVersions();
             return new HumanCatalogueReadResult(new HumanCatalogueRead(modDirectory, resources, state, reference, manipulations, race, bodyType,
-                summary, versions, $"{player.ObjectIndex}:{player.Address}:{player.GameObjectId}"), null);
+                summary, versions, $"{player.ObjectIndex}:{player.Address}:{player.GameObjectId}", profile), null);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {

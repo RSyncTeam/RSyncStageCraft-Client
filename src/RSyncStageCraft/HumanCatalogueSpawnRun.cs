@@ -320,17 +320,26 @@ internal sealed class HumanCatalogueSpawnRun
         }
         var entry = ready.Entry;
         var counts = entry.Counts;
+        // HV-5 M3: the entry's own profile, re-checked against its hash; never together with the test scale.
+        var profile = HumanCatalogueSpawnPreparation.ProfilePayload(entry, testScale, out var profileRefusal);
+        if (profileRefusal is not null)
+        {
+            ready.Abandon();
+            log(LogPrefix + $"spawn refused: {profileRefusal}; nothing was created.");
+            return;
+        }
         var plan = new HumanActorSpawnPlan(entry.Race, entry.Tribe, entry.Sex, entry.BodyType, ready.PhaseOneRequired,
             address => HumanCatalogueSkeletonSummary.BaseMismatch(entry.SkeletonSummary, ActorSkeleton(address)),
             address => HumanCatalogueSkeletonSummary.Mismatch(entry.SkeletonSummary, ActorSkeleton(address)),
             new HumanGlamourerPayload(entry.GlamourerState, HumanActorGlamourerStage.EquipmentAndCustomization, entry.GlamourerReference),
-            ready.Deformer, testScale, new HumanCatalogueDeformerRecheck(entry, ReadNow, stopping.Token), HumanPuppetNativeBackend.HumanDrawObject);
+            ready.Deformer, testScale, new HumanCatalogueDeformerRecheck(entry, ReadNow, stopping.Token), HumanPuppetNativeBackend.HumanDrawObject,
+            profile);
         log(LogPrefix + $"spawning entry {entry.ShortId}: versions as recorded; {ready.Holds.Count} stored file(s) held and verified; " +
             $"package {ready.Package.Redirects} redirect(s), {ready.Package.Swaps} swap(s); skeleton group " +
             (entry.Skeleton is { } group ? $"c{group.RaceCode:D4} ({group.Members.Count}, deformer {(group.Deformer ? "yes" : "no")})" : "none") +
             $"; deformer {(ready.Deformer ? "equal to the player's current one" : "none, on the entry or the player")}; " +
             $"by role: skeleton {counts.Skeleton}, physics {counts.Physics}, deformer {counts.Deformer}, other {counts.Other}; " +
-            $"Customize+ {(testScale ? "test scale" : "detach only")}.");
+            $"Customize+ {(testScale ? "test scale" : profile is not null ? $"entry profile, {profile.Description}" : "detach only")}.");
         session.Start(ready, plan);
     }
 

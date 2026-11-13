@@ -475,6 +475,8 @@ public sealed record HumanCatalogueSpawnReady(
 /// <item>the label, and the one entry with it, read only;</item>
 /// <item>owner decision D7: any recorded version that differs from the
 /// running game's or a provider's refuses;</item>
+/// <item>HV-5 M3: an entry with its own Customize+ profile refuses the test
+/// scale (D-M3-7) and needs Customize+ loaded;</item>
 /// <item>the entry's skeleton summary must be comparable;</item>
 /// <item>D3-a and D15 (S-1): the deformer the player's collection resolves
 /// now must have the stored deformer's content hash, or both must have none;
@@ -499,6 +501,10 @@ public static class HumanCatalogueSpawnPreparation
             return (null, "the label is unknown: " + unknown);
         if (VersionMismatch(entry.Versions, current.Versions.Bounded()) is { } stale)
             return (null, stale);
+        if (entry.Profile is not null && testScale)
+            return (null, "the test scale and the entry's own Customize+ profile are mutually exclusive; spawn it without the test scale");
+        if (entry.Profile is not null && current.Versions.CustomizePlus is null)
+            return (null, "the entry's Customize+ profile needs Customize+ loaded");
         if (testScale && current.Versions.CustomizePlus is null)
             return (null, "the test scale needs Customize+ loaded");
         if (!HumanCatalogueSkeletonSummary.Comparable(entry.SkeletonSummary))
@@ -547,6 +553,29 @@ public static class HumanCatalogueSpawnPreparation
                     hold.Dispose();
             }
         }
+    }
+
+    /// <summary>
+    /// HV-5 M3 (BC-6), on the game thread just before the plan is made: the
+    /// entry's own profile as the payload, re-checked against its stored hash
+    /// and counts; null with no refusal for an entry without a profile, and
+    /// null with the refusal when the profile does not check or the test
+    /// scale was also asked for.
+    /// </summary>
+    public static HumanCustomizePlusPayload? ProfilePayload(HumanCatalogueEntry entry, bool testScale, out string? refusal)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        refusal = null;
+        if (entry.Profile is not { } profile)
+            return null;
+        if (testScale)
+            refusal = "the test scale and the entry's own Customize+ profile are mutually exclusive";
+        else if (entry.ProfileCounts is not { } counts || entry.ProfileHash is null ||
+                 !string.Equals(HumanCatalogueEntry.HashOf(profile), entry.ProfileHash, StringComparison.Ordinal))
+            refusal = "the entry's Customize+ profile does not match its stored hash";
+        else
+            return new HumanCustomizePlusPayload(profile, counts.Describe());
+        return null;
     }
 
     /// <summary>

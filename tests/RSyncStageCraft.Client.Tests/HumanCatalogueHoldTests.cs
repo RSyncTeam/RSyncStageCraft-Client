@@ -33,9 +33,10 @@ public sealed class HumanCatalogueHoldTests : IDisposable
         }
     }
 
-    private HumanCatalogueFixture Fixture(string? customizePlus = HumanCatalogueFixture.CustomizePlusVersion, IReadOnlyList<string>? summary = null)
+    private HumanCatalogueFixture Fixture(string? customizePlus = HumanCatalogueFixture.CustomizePlusVersion, IReadOnlyList<string>? summary = null,
+        HumanCatalogueProfileRead? profile = null)
     {
-        var fixture = HumanCatalogueFixture.Create(customizePlus, summary: summary);
+        var fixture = HumanCatalogueFixture.Create(customizePlus, summary: summary, profile: profile);
         folders.Add(fixture.Folder);
         return fixture;
     }
@@ -152,6 +153,52 @@ public sealed class HumanCatalogueHoldTests : IDisposable
         var (ready, refusal) = Prepare(fixture);
         Assert.True(ready is not null, refusal);
         ready!.Abandon();
+    }
+
+    [Fact]
+    public void AnEntryWithItsOwnProfileRefusesTheTestScaleAndSpawnsWithItsProfileAsThePayload()
+    {
+        var fixture = Fixture(profile: ProfileSample.Read());
+        var before = Snapshot(fixture.Root);
+        Refused("the test scale and the entry's own Customize+ profile are mutually exclusive; spawn it without the test scale",
+            Prepare(fixture, testScale: true));
+        var (ready, refusal) = Prepare(fixture);
+        Assert.True(ready is not null, refusal);
+        Assert.Equal(HumanCatalogueEntry.ProfileFormat, ready!.Entry.Format);
+        var payload = HumanCatalogueSpawnPreparation.ProfilePayload(ready.Entry, false, out var none);
+        Assert.Null(none);
+        Assert.Equal(ProfileSample.Read().Profile, payload!.Json);
+        Assert.Equal("3 bone(s) (2 base, 0 other partial, 1 absent)", payload.Description);
+        ready.Abandon();
+        // Read only: the store is exactly as it was.
+        Assert.Equal(before, Snapshot(fixture.Root));
+    }
+
+    [Fact]
+    public void AnEntryWithItsOwnProfileIsRefusedWhenCustomizePlusIsNotLoaded()
+    {
+        // A profile entry always records Customize+ 2.2.1.3, so D7's version check refuses first; the profile's own check stays as a backstop.
+        var fixture = Fixture(profile: ProfileSample.Read());
+        Refused("the recorded Customize+ version differs (2.2.1.3 recorded, none now); an entry is spawned only with the versions it was captured with",
+            Prepare(fixture, fixture.Current() with { Versions = fixture.RecordedVersions with { CustomizePlus = null } }));
+    }
+
+    [Fact]
+    public void TheProfilePayloadIsReCheckedAgainstItsHashAndExcludesTheTestScale()
+    {
+        var fixture = Fixture(profile: ProfileSample.Read());
+        var entry = new HumanCatalogueStore(fixture.Root).FindEntry(HumanCatalogueFixture.Label, out _)!;
+        Assert.NotNull(HumanCatalogueSpawnPreparation.ProfilePayload(entry, false, out _));
+        Assert.Null(HumanCatalogueSpawnPreparation.ProfilePayload(entry, true, out var scaled));
+        Assert.Equal("the test scale and the entry's own Customize+ profile are mutually exclusive", scaled);
+        Assert.Null(HumanCatalogueSpawnPreparation.ProfilePayload(entry with { ProfileHash = new string('0', 64) }, false, out var tampered));
+        Assert.Equal("the entry's Customize+ profile does not match its stored hash", tampered);
+        // An entry without a profile has no payload and no refusal: the test scale or the detach only, as in M2.
+        var plain = Fixture();
+        var m2 = new HumanCatalogueStore(plain.Root).FindEntry(HumanCatalogueFixture.Label, out _)!;
+        Assert.Null(HumanCatalogueSpawnPreparation.ProfilePayload(m2, true, out var noRefusal));
+        Assert.Null(noRefusal);
+        Assert.Equal(HumanCatalogueEntry.CurrentFormat, m2.Format);
     }
 
     [Fact]
@@ -717,8 +764,9 @@ internal sealed class HumanCatalogueFixture
 
     public const string HairSkeleton = "chara/human/c0101/skeleton/hair/h0001/skl_c0101h0001.sklb";
 
+    /// <summary>HV-5 M3: with <paramref name="profile"/>, the entry is captured with the flag and holds that profile.</summary>
     public static HumanCatalogueFixture Create(string? customizePlus = CustomizePlusVersion, bool deformer = true, bool hair = false,
-        IReadOnlyList<string>? summary = null)
+        IReadOnlyList<string>? summary = null, HumanCatalogueProfileRead? profile = null)
     {
         var fixture = new HumanCatalogueFixture(Path.Combine(Path.GetTempPath(), "rsc-hv5-spawn", Guid.NewGuid().ToString("N")),
             Versions with { CustomizePlus = customizePlus });
@@ -737,10 +785,10 @@ internal sealed class HumanCatalogueFixture
         fixture.Resources = resources;
         var read = new HumanCatalogueRead(fixture.Mods, resources, Convert.ToBase64String(Encoding.UTF8.GetBytes("synthetic glamourer state")),
             "{\"FileVersion\":1,\"Equipment\":{}}", "synthetic-manipulations", new AppearanceCharacterRace(1, 1, 0), 1, summary ?? Summary,
-            fixture.RecordedVersions, "0:1:2");
+            fixture.RecordedVersions, "0:1:2", profile);
         var result = HumanCatalogueCapture.CaptureAsync(Label, new HumanCatalogueStore(fixture.Root),
             _ => Task.FromResult(new HumanCatalogueReadResult(read, null)), () => new DateTimeOffset(2026, 11, 3, 0, 0, 0, TimeSpan.Zero),
-            CancellationToken.None).GetAwaiter().GetResult();
+            CancellationToken.None, withProfile: profile is not null).GetAwaiter().GetResult();
         if (result.Entry is null)
             throw new InvalidOperationException("the synthetic capture was refused: " + result.Refusal);
         return fixture;

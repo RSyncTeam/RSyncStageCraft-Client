@@ -77,9 +77,17 @@ public sealed class HumanCatalogueSpawnTests : IDisposable
     private static readonly IReadOnlySet<string> Group =
         new HashSet<string>([FakeHumanActorPenumbra.Skeleton, FakeHumanActorPenumbra.Deformer], StringComparer.OrdinalIgnoreCase);
 
-    private HumanActorSpawnPlan Plan(bool testScale = false, byte race = 1, byte tribe = 1, byte sex = 0, byte body = 1) =>
+    private HumanActorSpawnPlan Plan(bool testScale = false, byte race = 1, byte tribe = 1, byte sex = 0, byte body = 1,
+        HumanCustomizePlusPayload? profile = null) =>
         new(race, tribe, sex, body, Group, address => baseSkeleton(address), address => skeleton(address),
-            new HumanGlamourerPayload(EntryState, 0x06, Reference), true, testScale, showCheck, _ => drawObject);
+            new HumanGlamourerPayload(EntryState, 0x06, Reference), true, testScale, showCheck, _ => drawObject, profile);
+
+    /// <summary>HV-5 M3: the synthetic entry profile, canonical, as a spawn's payload.</summary>
+    private static HumanCustomizePlusPayload EntryProfile()
+    {
+        var read = ProfileSample.Read();
+        return new HumanCustomizePlusPayload(read.Profile, read.Counts.Describe());
+    }
 
     private HumanActorBaseline Baseline(IHumanActorBackend? backend = null, Func<(HumanActorPenumbraPackage?, string?, string?)>? package = null)
     {
@@ -108,10 +116,10 @@ public sealed class HumanCatalogueSpawnTests : IDisposable
         return limit;
     }
 
-    private HumanActorBaseline Visible(bool testScale = false)
+    private HumanActorBaseline Visible(bool testScale = false, HumanCustomizePlusPayload? profile = null)
     {
         var baseline = Baseline();
-        Assert.True(baseline.Spawn(Plan(testScale)), string.Join(" | ", lines));
+        Assert.True(baseline.Spawn(Plan(testScale, profile: profile)), string.Join(" | ", lines));
         RunUntil(baseline, HumanActorPhase.Visible);
         Assert.Null(baseline.Stop);
         Assert.Equal(HumanActorPhase.Visible, baseline.Phase);
@@ -394,6 +402,94 @@ public sealed class HumanCatalogueSpawnTests : IDisposable
         Assert.True(baseline.Remove());
         Assert.Equal("customize+ delete", scene.Calls[from + 1]);
         Assert.Empty(customizePlus.Profiles);
+    }
+
+    // ---- HV-5 M3: the entry's own Customize+ profile, before the show ----
+
+    [Fact]
+    public void AnEntryProfileIsAppliedOnceAfterTheSkeletonMatchBeforeTheShowAndDeletedFirstByItsReceipt()
+    {
+        var payload = EntryProfile();
+        var baseline = Visible(profile: payload);
+        var profile = Assert.Single(customizePlus.Profiles);
+        Assert.Equal(payload.Json, profile.Value.Json);
+        Assert.NotEqual(HumanActorCustomizePlusStage.PayloadJson, profile.Value.Json);
+        Assert.Equal(scene.At(200).Name, profile.Value.Name);
+        Assert.Equal(1, customizePlus.Applies);
+        Assert.True(IndexOf("customize+ apply 200") < IndexOf("alpha 200 1"));
+        Assert.Equal(1, Shows());
+        Assert.Contains(lines, line => line.StartsWith(Prefix + "customize+: entry profile applied, receipt ", StringComparison.Ordinal) &&
+            line.Contains(", 3 bone(s) (2 base, 0 other partial, 1 absent); parent -1; ", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, line => line.Contains("j_kosi", StringComparison.Ordinal) || line.Contains(payload.Json, StringComparison.Ordinal));
+        var from = scene.Calls.Count;
+        Assert.True(baseline.Remove());
+        Assert.Equal("customize+ delete", scene.Calls[from + 1]);
+        Assert.Empty(customizePlus.Profiles);
+    }
+
+    [Fact]
+    public void AnEntryProfileStaysAppliedThroughASuccessfulReconfirmationAndIsNeverAppliedAgain()
+    {
+        var check = new FakeShowCheck();
+        showCheck = check;
+        var baseline = Visible(profile: EntryProfile());
+        drawObject = 0x7100;
+        baseline.OnFrameworkUpdate();
+        Assert.Equal(HumanActorPhase.Reconfirming, baseline.Phase);
+        RunUntil(baseline, HumanActorPhase.Visible);
+        Assert.Null(baseline.Stop);
+        Assert.Equal(HumanActorPhase.Visible, baseline.Phase);
+        Assert.Equal(2, Shows());
+        // The show's check, again: the profile is still the one applied, by its receipt; nothing is applied again.
+        Assert.Equal(1, customizePlus.Applies);
+        Assert.Single(customizePlus.Profiles);
+        Assert.True(baseline.Remove());
+        Assert.Empty(customizePlus.Profiles);
+    }
+
+    [Fact]
+    public void AFailedSkeletonReconfirmationWithAnEntryProfileHaltsHiddenAndDeletesItByItsReceipt()
+    {
+        var check = new FakeShowCheck();
+        showCheck = check;
+        var baseline = Visible(profile: EntryProfile());
+        drawObject = 0x7100;
+        baseline.OnFrameworkUpdate();
+        Assert.Equal(HumanActorPhase.Reconfirming, baseline.Phase);
+        var hidden = scene.Calls.Count;
+        skeleton = _ => "the actor's skeleton differs from the entry's (synthetic)";
+        RunUntil(baseline, HumanActorPhase.Visible, 1000);
+        Assert.NotNull(baseline.Stop);
+        Assert.StartsWith("reconfirm skeleton: the actor's skeleton differs", baseline.Stop, StringComparison.Ordinal);
+        Assert.DoesNotContain("alpha 200 1", scene.Calls.Skip(hidden));
+        Assert.Equal(1, Shows());
+        Assert.False(scene.Exists(200));
+        Assert.Equal(1, customizePlus.Applies);
+        Assert.Contains("customize+ delete", scene.Calls.Skip(hidden));
+        Assert.Empty(customizePlus.Profiles);
+    }
+
+    [Fact]
+    public void AnEntryProfileThatIsRefusedHaltsTheActorBeforeTheShow()
+    {
+        customizePlus.ApplyAnswer = HumanActorCustomizePlusStage.CorruptedProfile;
+        var baseline = Baseline();
+        Assert.True(baseline.Spawn(Plan(profile: EntryProfile())), string.Join(" | ", lines));
+        RunUntil(baseline, HumanActorPhase.Visible, 1000);
+        Assert.NotNull(baseline.Stop);
+        Assert.StartsWith("customize+: the apply was refused (CorruptedProfile); no profile was created", baseline.Stop, StringComparison.Ordinal);
+        Assert.Equal(0, Shows());
+        Assert.Empty(customizePlus.Profiles);
+    }
+
+    [Fact]
+    public void TheTestScaleAndAnEntryProfileTogetherAreRefusedBeforeAnythingIsCreated()
+    {
+        var baseline = Baseline();
+        Assert.False(baseline.Spawn(Plan(testScale: true, profile: EntryProfile())));
+        Assert.Contains(lines, line => line.Contains("the test scale and an entry's profile are mutually exclusive", StringComparison.Ordinal));
+        Assert.DoesNotContain("create", scene.Calls);
+        Assert.Equal(0, customizePlus.Applies);
     }
 
     [Fact]

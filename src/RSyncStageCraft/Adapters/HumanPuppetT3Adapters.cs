@@ -371,6 +371,50 @@ internal sealed unsafe class HumanPuppetNativeBackend : IHumanPuppetBackend
         return facts;
     }
 
+    /// <summary>
+    /// HV-5 M3, read only, memory only: for each partial skeleton of the
+    /// object's human draw object, in slot order, its bone names (null for a
+    /// slot with no skeleton resource; empty when the resource has no Havok
+    /// skeleton). Null when there is no human draw object or skeleton, or the
+    /// read fails. The capture uses the names only to classify the profile's
+    /// bones and never stores, logs or hashes them here.
+    /// </summary>
+    internal static IReadOnlyList<IReadOnlyList<string>?>? SkeletonBoneNames(nint address)
+    {
+        try
+        {
+            var gameObject = (GameObjectStruct*)address;
+            if (gameObject == null || !IsHumanDrawObject(gameObject))
+                return null;
+            var skeleton = (RenderSkeleton*)((CharacterBase*)gameObject->DrawObject)->Skeleton;
+            if (skeleton == null)
+                return null;
+            var partials = new List<IReadOnlyList<string>?>(skeleton->PartialSkeletonCount);
+            for (var i = 0; i < skeleton->PartialSkeletonCount; i++)
+            {
+                var handle = skeleton->PartialSkeletons[i].SkeletonResourceHandle;
+                if (handle == null)
+                {
+                    partials.Add(null);
+                    continue;
+                }
+                var havok = handle->HavokSkeleton;
+                var names = new List<string>(havok != null ? havok->Bones.Length : 0);
+                if (havok != null)
+                {
+                    for (var bone = 0; bone < havok->Bones.Length; bone++)
+                        names.Add(havok->Bones.Data[bone].Name.String ?? string.Empty);
+                }
+                partials.Add(names);
+            }
+            return partials;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>A short SHA-256 prefix: enough to compare, nothing to reconstruct.</summary>
     internal static string Hash(ReadOnlySpan<byte> data) => Convert.ToHexString(SHA256.HashData(data))[..16].ToLowerInvariant();
 }
