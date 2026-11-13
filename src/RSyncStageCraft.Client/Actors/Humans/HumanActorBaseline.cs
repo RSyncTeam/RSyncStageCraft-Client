@@ -122,6 +122,11 @@ public enum HumanActorPhase
 /// <item><paramref name="Deformer"/>: the entry's package redirects the deformer.</item>
 /// <item><paramref name="TestScale"/>: HV-4's fixed Customize+ profile is
 /// applied before the show (owner decision D14, a regression check only).</item>
+/// <item><paramref name="Profile"/>: HV-5 M3, the entry's own Customize+
+/// profile (owner-approved at capture), applied at the same place: after the
+/// whole-skeleton match and before the show, at alpha 0. It and
+/// <paramref name="TestScale"/> are mutually exclusive (D-M3-7); a plan with
+/// both is refused before anything is created.</item>
 /// <item><paramref name="ShowCheck"/>: begun when the entry's state is
 /// applied and answered before the show (U-5: the deformer re-check); a
 /// refusal halts the actor while it is hidden.</item>
@@ -143,8 +148,12 @@ public sealed record HumanActorSpawnPlan(
     bool Deformer,
     bool TestScale,
     IHumanActorShowCheck? ShowCheck = null,
-    Func<nint, nint>? DrawObject = null)
+    Func<nint, nint>? DrawObject = null,
+    HumanCustomizePlusPayload? Profile = null)
 {
+    /// <summary>True when a Customize+ profile is applied before the show: the test scale or the entry's profile.</summary>
+    public bool AppliesProfile => TestScale || Profile is not null;
+
     /// <summary>Never the plan's data.</summary>
     public override string ToString() => "HV-5 spawn plan";
 }
@@ -381,6 +390,8 @@ public sealed class HumanActorBaseline
             return Refuse("a spawn from an entry needs the Penumbra, Glamourer and Customize+ stages and W-3");
         if (plan is not null && plan.DrawObject is null)
             return Refuse("a spawn from an entry needs the draw-object read");
+        if (plan is not null && plan.TestScale && plan.Profile is not null)
+            return Refuse("the test scale and an entry's profile are mutually exclusive");
         if (Stop is not null)
             return Refuse("an earlier step stopped; nothing is retried until unload");
         if (actor is not null)
@@ -464,8 +475,8 @@ public sealed class HumanActorBaseline
             if (MatchRefusal(copied.Customize!, plan) is { } mismatch)
                 return Halt("match", mismatch, candidate);
             candidate.Plan = plan;
-            // No Customize+ apply unless the test scale was asked for (D14); the detach still runs.
-            candidate.CustomizePlusTried = !plan.TestScale;
+            // No Customize+ apply unless the test scale (D14) or the entry's profile (M3) was asked for; the detach still runs.
+            candidate.CustomizePlusTried = !plan.AppliesProfile;
             log(prefix + "match: the actor's race, clan, gender and body type are the entry's.");
         }
 
@@ -842,9 +853,9 @@ public sealed class HumanActorBaseline
         }
         if (!current.CustomizePlusTried)
         {
-            // D14: HV-4's fixed profile, a regression check only, still at alpha 0.
+            // D14: HV-4's fixed profile, a regression check only; or M3: the entry's own profile. Still at alpha 0.
             current.CustomizePlusTried = true;
-            if (customizePlus!.Apply(current.GlobalIndex, CustomizePlusChecks(current)) is { } refusedProfile)
+            if (customizePlus!.Apply(current.GlobalIndex, CustomizePlusChecks(current), current.Plan?.Profile) is { } refusedProfile)
                 Halt("customize+", refusedProfile.StartsWith(CustomizePlusPrefix, StringComparison.Ordinal)
                     ? refusedProfile[CustomizePlusPrefix.Length..] : refusedProfile, current);
             return;
@@ -883,7 +894,7 @@ public sealed class HumanActorBaseline
             current.Reread = true;
         }
         var plan = current.Plan!;
-        if (plan.TestScale != (customizePlus.State == HumanCustomizePlusState.Applied))
+        if (plan.AppliesProfile != (customizePlus.State == HumanCustomizePlusState.Applied))
         {
             Halt(show, $"the Customize+ profile is {customizePlus.State}, not as asked", current);
             return;

@@ -23,6 +23,7 @@ namespace RSyncStageCraft.Core.Actors.Humans;
 /// <param name="SkeletonSummary">The player's own skeleton summary (hashes only), as the T3 observation reads it.</param>
 /// <param name="Versions">C9.</param>
 /// <param name="PlayerObject">The exact player object (index, address, id), for the re-check only.</param>
+/// <param name="Profile">HV-5 M3, C8: the owner-approved Customize+ profile, read only with the explicit flag; otherwise null.</param>
 public sealed record HumanCatalogueRead(
     string? ModDirectory,
     IReadOnlyList<AppearanceResourceEntry> Resources,
@@ -33,7 +34,8 @@ public sealed record HumanCatalogueRead(
     byte BodyType,
     IReadOnlyList<string> SkeletonSummary,
     HumanCatalogueVersions Versions,
-    string PlayerObject)
+    string PlayerObject,
+    HumanCatalogueProfileRead? Profile = null)
 {
     /// <summary>Never the read data.</summary>
     public override string ToString() => $"catalogue read ({Resources.Count} resource entries)";
@@ -317,6 +319,14 @@ public static class HumanCataloguePlanner
         Add(read.Versions.Penumbra);
         Add(read.Versions.Glamourer);
         Add(read.Versions.CustomizePlus);
+        // HV-5 M3: the profile read, when there is one (an absent profile adds nothing, so M1's fingerprint is unchanged).
+        if (read.Profile is { } profile)
+        {
+            Add("customize+ profile");
+            Add(profile.IdTag);
+            Add(profile.Profile);
+            Add(profile.Counts.Describe());
+        }
         return Convert.ToHexString(sha.GetHashAndReset());
     }
 
@@ -357,6 +367,34 @@ public static class HumanCataloguePlanner
     }
 }
 
+/// <summary>
+/// HV-5 M3: the capture step's text. <c>capture &lt;label&gt;</c> is M1's
+/// capture; <c>capture &lt;label&gt; with-customize+</c> also reads the
+/// owner-approved Customize+ profile (D2). A label never holds <c>+</c>, so
+/// the flag cannot be part of one. The label is checked by the capture.
+/// </summary>
+public static class HumanCatalogueCaptureCommand
+{
+    public const string Capture = "capture ";
+    public const string WithProfile = " with-customize+";
+
+    public static bool TryParse(string? step, out string label, out bool withProfile)
+    {
+        label = string.Empty;
+        withProfile = false;
+        if (step is null || !step.StartsWith(Capture, StringComparison.Ordinal))
+            return false;
+        var rest = step[Capture.Length..];
+        if (rest.EndsWith(WithProfile, StringComparison.Ordinal))
+        {
+            withProfile = true;
+            rest = rest[..^WithProfile.Length];
+        }
+        label = rest;
+        return rest.Trim().Length > 0;
+    }
+}
+
 /// <summary>How one capture ended: the written entry, or the refusal; and the log lines (no local path, no stored data).</summary>
 public sealed record HumanCatalogueCaptureResult(HumanCatalogueEntry? Entry, string? Refusal, IReadOnlyList<string> Lines);
 
@@ -370,6 +408,10 @@ public sealed record HumanCatalogueCaptureResult(HumanCatalogueEntry? Entry, str
 /// <item>The re-check: a second read, whose fingerprint must equal the first one's.</item>
 /// <item>The entry is checked to hold no local path, then written once.</item>
 /// </list>
+/// HV-5 M3: with <c>withProfile</c> (the explicit <c>with-customize+</c>
+/// flag), both reads must carry the owner-approved profile, and the entry is
+/// written in <see cref="HumanCatalogueEntry.ProfileFormat"/>; without it, a
+/// read carrying a profile is refused and the capture is exactly M1's.
 /// Files copied before a refusal stay in the store as unreferenced files
 /// (counted by <c>list</c>); nothing is deleted.
 /// </summary>
@@ -380,7 +422,8 @@ public static class HumanCatalogueCapture
         HumanCatalogueStore store,
         Func<CancellationToken, Task<HumanCatalogueReadResult>> read,
         Func<DateTimeOffset> now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool withProfile = false)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(read);
@@ -402,6 +445,8 @@ public static class HumanCatalogueCapture
             return Refuse("Glamourer's structured state is missing");
         if (snapshot.Manipulations is null)
             return Refuse("Penumbra's manipulations are missing");
+        if (ProfileRefusal(snapshot, withProfile) is { } profileRefusal)
+            return Refuse(profileRefusal);
 
         var (plan, planRefusal) = await HumanCataloguePlanner.PlanAsync(snapshot, cancellationToken).ConfigureAwait(false);
         if (plan is null)
@@ -412,7 +457,7 @@ public static class HumanCatalogueCapture
         // escaping; 1 KiB a game path; 64 KiB besides); its write re-checks the real size.
         var entryEstimate = Math.Min(HumanCatalogueEntryCodec.MaximumEntryBytes,
             2L * (Encoding.UTF8.GetByteCount(snapshot.GlamourerState) + Encoding.UTF8.GetByteCount(snapshot.GlamourerReference) +
-                Encoding.UTF8.GetByteCount(snapshot.Manipulations)) +
+                Encoding.UTF8.GetByteCount(snapshot.Manipulations) + Encoding.UTF8.GetByteCount(snapshot.Profile?.Profile ?? string.Empty)) +
             1024L * plan.Paths.Count + 64 * 1024);
         var (fits, missing) = store.Room(plan.Files.Select(file => file.Blob), entryEstimate);
         if (!fits)
@@ -445,11 +490,14 @@ public static class HumanCatalogueCapture
         var second = await read(cancellationToken).ConfigureAwait(false);
         if (second.Read is not { } again)
             return Refuse(second.Refusal ?? "the character could not be read again");
+        if (ProfileRefusal(again, withProfile) is { } againRefusal)
+            return Refuse(againRefusal);
         if (!string.Equals(HumanCataloguePlanner.Fingerprint(again), HumanCataloguePlanner.Fingerprint(snapshot), StringComparison.Ordinal))
             return Refuse("the appearance changed during the capture");
 
+        var profile = withProfile ? snapshot.Profile : null;
         var entry = new HumanCatalogueEntry(
-            HumanCatalogueEntry.CurrentFormat,
+            profile is null ? HumanCatalogueEntry.CurrentFormat : HumanCatalogueEntry.ProfileFormat,
             Guid.NewGuid(),
             label,
             now().ToUniversalTime(),
@@ -469,7 +517,10 @@ public static class HumanCatalogueCapture
             plan.Skeleton,
             snapshot.SkeletonSummary.ToList(),
             plan.Counts,
-            HumanCatalogueEntry.NoProfile);
+            profile is null ? HumanCatalogueEntry.NoProfile : HumanCatalogueEntry.OwnerApproved,
+            profile?.Profile,
+            profile?.ProfileHash,
+            profile?.Counts);
         if (HumanCatalogueEntryCodec.Problem(entry) is { } problem)
             return Refuse($"the entry is not valid ({problem})");
         var locals = snapshot.Resources.Select(resource => resource.ActualPath).Where(AppearanceCapturePlanner.IsLocalFile).ToList();
@@ -494,7 +545,28 @@ public static class HumanCatalogueCapture
             $"reference keys {ReferenceKeys(entry.GlamourerReference)}");
         lines.Add($"versions: game {entry.Versions.Game ?? "unknown"}, Penumbra {entry.Versions.Penumbra ?? "unknown"}, " +
             $"Glamourer {entry.Versions.Glamourer ?? "unknown"}, Customize+ {entry.Versions.CustomizePlus ?? "not installed"}; profile source {entry.ProfileSource}");
+        if (profile is not null)
+            lines.Add($"profile: owner-approved (active), id {profile.IdTag}, {profile.Counts.Describe()}; stored, no name " +
+                "(temporary profiles, the editor and the global default profile cannot be read)");
         return new HumanCatalogueCaptureResult(entry, null, lines);
+    }
+
+    /// <summary>HV-5 M3: null when the read carries a profile exactly when one was asked for, and that profile is consistent.</summary>
+    private static string? ProfileRefusal(HumanCatalogueRead read, bool withProfile)
+    {
+        if (!withProfile)
+            return read.Profile is null ? null : "a Customize+ profile was read without the flag";
+        if (read.Profile is not { } profile)
+            return "the Customize+ profile was not read";
+        if (read.Versions?.CustomizePlus != HumanActorCustomizePlusStage.RequiredVersion)
+            return $"the Customize+ profile needs Customize+ {HumanActorCustomizePlusStage.RequiredVersion} recorded";
+        if (HumanCatalogueProfile.Canonicalize(profile.Profile, out var bones, out _) != profile.Profile ||
+            profile.ProfileHash != HumanCatalogueEntry.HashOf(profile.Profile) || profile.Counts.Bones != bones.Count ||
+            profile.Counts.Base + profile.Counts.Other == 0 || profile.IdTag is not { Length: 8 })
+            return "the Customize+ profile read is not consistent";
+        if (!HumanCatalogueSkeletonSummary.Comparable(read.SkeletonSummary))
+            return "the Customize+ profile needs a skeleton summary the spawn can compare";
+        return null;
     }
 
     /// <summary>True if the UTF-8 entry text holds any local path, as written or JSON-escaped, with either separator.</summary>

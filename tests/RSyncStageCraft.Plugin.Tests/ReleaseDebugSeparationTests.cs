@@ -563,8 +563,9 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv4RunType && target.Name == ".ctor").ToArray());
-        // HV-5 M2's spawn composes the same Customize+ adapter and stage in its own runner.
-        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor") },
+        // HV-5 M2's spawn composes the same Customize+ adapter and stage in its own runner; HV-5 M3's capture constructs the adapter
+        // for its profile read only, and no stage.
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor") },
             Plugin.Callers(target => target.Type == Hv4CustomizePlusType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
                 .ToArray());
         Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor") },
@@ -579,7 +580,15 @@ public sealed class ReleaseDebugSeparationTests
     [
         HumanPuppetNamespace + "HumanCatalogueLabel", HumanPuppetNamespace + "HumanCatalogueEntry", HumanPuppetNamespace + "HumanCatalogueEntryCodec",
         HumanPuppetNamespace + "HumanCatalogueStore", HumanPuppetNamespace + "HumanCataloguePlanner", HumanPuppetNamespace + "HumanCatalogueCapture",
+        // HV-5 M3: the owner-approved Customize+ profile.
+        HumanPuppetNamespace + "HumanCatalogueProfile", HumanPuppetNamespace + "HumanCatalogueProfileReader",
+        HumanPuppetNamespace + "IHumanCatalogueProfileReads", HumanPuppetNamespace + "HumanCatalogueProfileAnswer",
+        HumanPuppetNamespace + "HumanCatalogueProfileCounts", HumanPuppetNamespace + "HumanCatalogueProfileRead",
+        HumanPuppetNamespace + "HumanCatalogueCaptureCommand", HumanPuppetNamespace + "HumanCustomizePlusPayload",
     ];
+
+    /// <summary>HV-5 M3's one new Customize+ label (owner decision D-M3-2).</summary>
+    private const string ProfileContentLabel = "CustomizePlus.Profile.GetByUniqueId";
 
     [Fact]
     public void TheHv5CatalogueRunnerItsCommandAndItsCatalogueExistOnlyInDebug()
@@ -594,9 +603,15 @@ public sealed class ReleaseDebugSeparationTests
         Assert.Equal(Debug, Plugin.HasType(Hv5RunType));
         Assert.Equal(Debug, Plugin.UserStrings.Contains("/rschv5"));
         Assert.Equal(Debug, Plugin.HasMethod(Hv3GlamourerType, "StateJson"));
-        // M1 reads no Customize+ profile content in either build (C8 is M3, decision D2).
-        Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith("CustomizePlus.Profile.GetByUniqueId", StringComparison.Ordinal) ||
-            value.StartsWith("CustomizePlus.Profile.GetProfileByUniqueId", StringComparison.Ordinal));
+        // HV-5 M3 (D-M3-2): the profile content read's label is present only in Debug (the compiler stores a literal once, so this
+        // is presence, not a count of uses); no other label begins with it, and Customize+'s private method name is not a label.
+        // Its one subscriber is the adapter's field; the field is used only by ActiveProfile (reviewed; no IL field check here).
+        Assert.Equal(Debug, Plugin.UserStrings.Contains(ProfileContentLabel));
+        Assert.Equal(Debug, Plugin.HasField(Hv4CustomizePlusType, "profileContent"));
+        Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith(ProfileContentLabel, StringComparison.Ordinal) && value != ProfileContentLabel);
+        Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith("CustomizePlus.Profile.GetProfileByUniqueId", StringComparison.Ordinal));
+        Assert.Equal(Debug, Plugin.HasMethod(Hv4CustomizePlusType, "ActiveProfile"));
+        Assert.Equal(Debug, Plugin.HasMethod("RSyncStageCraft.Adapters.HumanPuppetNativeBackend", "SkeletonBoneNames"));
         // In the Client, outside the options record itself, only the catalogue
         // planner's static constructor builds capture options (skeleton group
         // and deformer on, for its own plan), and only in Debug.
@@ -613,7 +628,9 @@ public sealed class ReleaseDebugSeparationTests
             target.Type == Hv3StageType || target.Type == Hv4StageType), caller => caller.Type.StartsWith(Hv5RunType, StringComparison.Ordinal));
         // Every plugin adapter member the runner (or what the compiler nests in
         // it) calls is on this read-only allowlist: no stage, write, spawn,
-        // native write, collection or Customize+ member is reachable from it.
+        // native write or collection member is reachable from it. HV-5 M3: the
+        // only Customize+ member is the adapter's constructor; its profile reads
+        // are reached only through the Client's profile reader.
         static bool InHv5Run(MethodName caller) => caller.Type.StartsWith(Hv5RunType, StringComparison.Ordinal);
         var allowed = new HashSet<MethodName>
         {
@@ -632,6 +649,8 @@ public sealed class ReleaseDebugSeparationTests
             new(Hv3GlamourerType, ".ctor"),
             new(Hv3GlamourerType, "StateJson"),
             new("RSyncStageCraft.Adapters.HumanPuppetNativeBackend", "SkeletonSummary"),
+            new("RSyncStageCraft.Adapters.HumanPuppetNativeBackend", "SkeletonBoneNames"),
+            new(Hv4CustomizePlusType, ".ctor"),
             new("RSyncStageCraft.Adapters.DalamudGameVersion", "Read"),
         };
         var adapterCalls = Plugin.CalledBy(InHv5Run).Where(target => target.Type.StartsWith("RSyncStageCraft.Adapters.", StringComparison.Ordinal))
@@ -646,6 +665,15 @@ public sealed class ReleaseDebugSeparationTests
         var structured = Plugin.Callers(target => target.Type == Hv3GlamourerType && target.Name == "StateJson").ToArray();
         Assert.NotEmpty(structured);
         Assert.All(structured, caller => Assert.StartsWith(Hv5RunType, caller.Type, StringComparison.Ordinal));
+        // HV-5 M3: the plugin never calls the profile read itself; in the Client only the profile reader does, and only the
+        // capture's runner (and what the compiler nests in it) calls the reader and the bone-name read.
+        Assert.Empty(Plugin.Callers(target => target.Name == "ActiveProfile"));
+        Assert.Equal(new[] { new MethodName(HumanPuppetNamespace + "HumanCatalogueProfileReader", "Read") },
+            Client.Callers(target => target.Name == "ActiveProfile").Distinct().ToArray());
+        var readers = Plugin.Callers(target => target.Type == HumanPuppetNamespace + "HumanCatalogueProfileReader" ||
+            target.Name == "SkeletonBoneNames").ToArray();
+        Assert.NotEmpty(readers);
+        Assert.All(readers, caller => Assert.StartsWith(Hv5RunType, caller.Type, StringComparison.Ordinal));
     }
 
     private const string Hv5SpawnRunType = "RSyncStageCraft.HumanCatalogueSpawnRun";
@@ -672,9 +700,9 @@ public sealed class ReleaseDebugSeparationTests
             Assert.Equal(Debug, client.GetType(type) is not null);
         Assert.Equal(Debug, Plugin.HasType(Hv5SpawnRunType));
         Assert.Equal(Debug, Plugin.HasMethod(Hv3GlamourerType, "GetStateJson"));
-        // M2 reads no Customize+ profile content in either build (C8 is M3).
-        Assert.DoesNotContain(Plugin.UserStrings, value => value.StartsWith("CustomizePlus.Profile.GetByUniqueId", StringComparison.Ordinal) ||
-            value.StartsWith("CustomizePlus.Profile.GetProfileByUniqueId", StringComparison.Ordinal));
+        // The spawn reads no Customize+ profile content (HV-5 M3's read is the capture's alone; the previous test).
+        Assert.DoesNotContain(Plugin.CalledBy(caller => caller.Type.StartsWith(Hv5SpawnRunType, StringComparison.Ordinal)),
+            target => target.Name is "ActiveProfile" or "SkeletonBoneNames" || target.Type == HumanPuppetNamespace + "HumanCatalogueProfileReader");
         var detachers = Client.ReferenceCallers(target => target.Name == "SetHandleAsInvalid").ToArray();
         Assert.Equal(Debug ? new[] { new MethodName(HumanPuppetNamespace + "HumanCatalogueHoldSet", "DetachHandle") } : Array.Empty<MethodName>(),
             detachers);

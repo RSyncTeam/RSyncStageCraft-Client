@@ -77,10 +77,17 @@ public sealed record HumanCatalogueCounts(
     int Skeleton, int Physics, int Deformer, int Other);
 
 /// <summary>
-/// One immutable catalogue entry, local format <see cref="CurrentFormat"/>.
+/// One immutable catalogue entry, local format <see cref="CurrentFormat"/>
+/// (no profile) or, from HV-5 M3, <see cref="ProfileFormat"/> (the same
+/// fields plus the owner-approved Customize+ profile).
 /// The Glamourer state and the manipulations are stored as Penumbra and
 /// Glamourer returned them (opaque); the structured Glamourer reference is
 /// kept for the later spawn's readback (D8 option b) and is not decoded here.
+/// <para>HV-5 M3: <paramref name="Profile"/> is the canonical profile text
+/// (<see cref="HumanCatalogueProfile.Canonicalize"/>), with its hash and its
+/// counts against the captured skeleton. All three are null in a
+/// <see cref="CurrentFormat"/> entry and are then not written, so such an
+/// entry's file is exactly as before M3.</para>
 /// </summary>
 public sealed record HumanCatalogueEntry(
     string Format,
@@ -103,12 +110,22 @@ public sealed record HumanCatalogueEntry(
     HumanCatalogueSkeleton? Skeleton,
     IReadOnlyList<string> SkeletonSummary,
     HumanCatalogueCounts Counts,
-    string ProfileSource)
+    string ProfileSource,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Profile = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ProfileHash = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HumanCatalogueProfileCounts? ProfileCounts = null)
 {
+    /// <summary>An entry with no Customize+ profile (M1 and M2; still written by a capture without the flag).</summary>
     public const string CurrentFormat = "hv5-local-1";
 
-    /// <summary>M1 never reads a Customize+ profile; D2 decides a source at M3.</summary>
+    /// <summary>HV-5 M3: an entry with the owner-approved Customize+ profile.</summary>
+    public const string ProfileFormat = "hv5-local-2";
+
+    /// <summary>No Customize+ profile was read (every <see cref="CurrentFormat"/> entry).</summary>
     public const string NoProfile = "none";
+
+    /// <summary>D2 (M3): the normal profile active on the owner's character at capture, read with the explicit flag.</summary>
+    public const string OwnerApproved = "owner-approved";
 
     /// <summary>The 8-character id used in log lines (not stored).</summary>
     [JsonIgnore]
@@ -197,7 +214,7 @@ public static class HumanCatalogueEntryCodec
     /// <summary>Null when every field is valid; otherwise the first problem (no stored data in it).</summary>
     public static string? Problem(HumanCatalogueEntry entry)
     {
-        if (entry.Format != HumanCatalogueEntry.CurrentFormat)
+        if (entry.Format is not (HumanCatalogueEntry.CurrentFormat or HumanCatalogueEntry.ProfileFormat))
             return "unknown format";
         if (entry.EntryId == Guid.Empty)
             return "no entry id";
@@ -205,8 +222,8 @@ public static class HumanCatalogueEntryCodec
             return "invalid label";
         if (entry.Versions is null || entry.Versions != entry.Versions.Bounded())
             return "invalid versions";
-        if (entry.ProfileSource != HumanCatalogueEntry.NoProfile)
-            return "unknown profile source";
+        if (ProfileProblem(entry) is { } profile)
+            return profile;
         if (string.IsNullOrEmpty(entry.GlamourerState) || !GameAppearanceCaptureReader.IsCanonicalBase64(entry.GlamourerState) ||
             entry.GlamourerStateHash != HumanCatalogueEntry.HashOf(entry.GlamourerState))
             return "invalid Glamourer state";
@@ -270,6 +287,36 @@ public static class HumanCatalogueEntryCodec
             counts.Bytes != blobs.Values.Sum() || counts.Vanilla < 0 || counts.Outside < 0 ||
             counts.Skeleton + counts.Physics + counts.Deformer + counts.Other != redirects)
             return "invalid counts";
+        return null;
+    }
+
+    /// <summary>
+    /// The profile fields by format: none for <see cref="HumanCatalogueEntry.CurrentFormat"/>
+    /// (source <c>none</c>, as in M1); for <see cref="HumanCatalogueEntry.ProfileFormat"/>,
+    /// source <c>owner-approved</c>, Customize+ 2.2.1.3 recorded (the version the read was gated on), canonical text (canonicalizing it again
+    /// changes nothing), its hash, consistent counts with at least one bone on
+    /// the captured skeleton (D-M3-10), and a skeleton summary the spawn can compare.
+    /// </summary>
+    private static string? ProfileProblem(HumanCatalogueEntry entry)
+    {
+        if (entry.Format == HumanCatalogueEntry.CurrentFormat)
+        {
+            if (entry.ProfileSource != HumanCatalogueEntry.NoProfile)
+                return "unknown profile source";
+            return entry.Profile is null && entry.ProfileHash is null && entry.ProfileCounts is null ? null : "a profile in an entry without one";
+        }
+        if (entry.ProfileSource != HumanCatalogueEntry.OwnerApproved)
+            return "unknown profile source";
+        if (entry.Versions?.CustomizePlus != HumanActorCustomizePlusStage.RequiredVersion)
+            return $"a profile needs Customize+ {HumanActorCustomizePlusStage.RequiredVersion} recorded";
+        if (entry.Profile is null || HumanCatalogueProfile.Canonicalize(entry.Profile, out var bones, out _) != entry.Profile ||
+            entry.ProfileHash != HumanCatalogueEntry.HashOf(entry.Profile))
+            return "invalid profile";
+        if (entry.ProfileCounts is not { } counts || counts.Bones != bones.Count || counts.Base < 0 || counts.Other < 0 || counts.Absent < 0 ||
+            counts.Base + counts.Other + counts.Absent != counts.Bones || counts.Base + counts.Other == 0)
+            return "invalid profile counts";
+        if (entry.SkeletonSummary is null || !HumanCatalogueSkeletonSummary.Comparable(entry.SkeletonSummary))
+            return "a profile needs a comparable skeleton summary";
         return null;
     }
 

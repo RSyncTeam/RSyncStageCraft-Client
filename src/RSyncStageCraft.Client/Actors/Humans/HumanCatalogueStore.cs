@@ -27,7 +27,7 @@ public enum HumanCatalogueImportStatus
 /// <summary>One entry as <see cref="HumanCatalogueStore.List"/> reports it: no path and no stored data.</summary>
 public sealed record HumanCatalogueListing(
     string Label, string ShortId, DateTimeOffset CapturedUtc, int GamePaths, int Files, long Bytes, int Outside, bool Complete,
-    HumanCatalogueSkeleton? Skeleton, HumanCatalogueVersions Versions);
+    HumanCatalogueSkeleton? Skeleton, HumanCatalogueVersions Versions, int? ProfileBones = null);
 
 /// <summary>The catalogue as listed: its entries, entry files that could not be read, and stored files no entry names.</summary>
 public sealed record HumanCatalogueList(IReadOnlyList<HumanCatalogueListing> Entries, int UnreadableEntries, int OrphanFiles, long UsedBytes, long LimitBytes);
@@ -337,7 +337,7 @@ public sealed class HumanCatalogueStore
                 complete &= stored.TryGetValue(blob.Hash, out var size) && size == blob.Size;
             }
             listings.Add(new HumanCatalogueListing(entry.Label, entry.ShortId, entry.CapturedUtc, entry.Paths.Count, entry.Counts.Files,
-                entry.Counts.Bytes, entry.Counts.Outside, complete, entry.Skeleton, entry.Versions));
+                entry.Counts.Bytes, entry.Counts.Outside, complete, entry.Skeleton, entry.Versions, entry.ProfileCounts?.Bones));
         }
         return new HumanCatalogueList(listings, unreadable, stored.Keys.Count(hash => !named.Contains(hash)), UsedBytes(), LimitBytes);
     }
