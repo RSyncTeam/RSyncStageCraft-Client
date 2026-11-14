@@ -19,7 +19,11 @@ public static class ProtocolConstants
     // no look-at); the server-owned animation sequence; the
     // placeholder actor fields (model identity, actor type, resource
     // manifest, appearance references) and the actorAppearance patch removed.
-    public const int CurrentVersion = 6;
+    // Version 7: the shared human actor, a fourth object kind ("human")
+    // naming one immutable, owner-published appearance bundle by its
+    // content hash, with position and yaw only and owner-only editing;
+    // the humanTransform patch. Saved scenes move to scene format 2.
+    public const int CurrentVersion = 7;
 
     /// <summary>
     /// Exactly two players. Used only by the

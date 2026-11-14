@@ -1,0 +1,1 @@
+{"envelope":{"protocolVersion":7,"messageType":"acknowledgeObjects","messageId":"00000000-0000-4000-8000-000000000105","sessionId":1,"sessionGeneration":2,"connectionEpoch":3},"payload":{"appliedThrough":{"value":7}}}

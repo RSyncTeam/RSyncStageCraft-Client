@@ -188,7 +188,7 @@ public sealed class ObjectControlMessageCodec
             _ => true,
         };
 
-    /// <summary>The payload type of a message type with a protocol 6 wire route, or null (retired or unknown: refused).</summary>
+    /// <summary>The payload type of a message type with a protocol 7 wire route, or null (retired or unknown: refused).</summary>
     private static Type? PayloadType(ObjectProtocolMessageType type) => type switch
     {
         ObjectProtocolMessageType.CreateObject => typeof(CreateObjectRequest),
@@ -278,16 +278,19 @@ public sealed class ObjectControlMessageCodec
 
             if (info.Type == typeof(AuthoritativeObjectState))
                 info.PolymorphismOptions = Union(
-                    new(typeof(ActorState), "actor"), new(typeof(FurnitureState), "furniture"), new(typeof(LightState), "light"));
+                    new(typeof(ActorState), "actor"), new(typeof(FurnitureState), "furniture"), new(typeof(LightState), "light"),
+                    new(typeof(HumanActorState), "human"));
             else if (info.Type == typeof(ObjectCreatePayload))
                 info.PolymorphismOptions = Union(
-                    new(typeof(ActorCreatePayload), "actor"), new(typeof(FurnitureCreatePayload), "furniture"), new(typeof(LightCreatePayload), "light"));
+                    new(typeof(ActorCreatePayload), "actor"), new(typeof(FurnitureCreatePayload), "furniture"), new(typeof(LightCreatePayload), "light"),
+                    new(typeof(HumanActorCreatePayload), "human"));
             else if (info.Type == typeof(ObjectPatch))
                 info.PolymorphismOptions = Union(
                     new(typeof(ActorTransformPatch), "actorTransform"),
                     new(typeof(ActorControlPatch), "actorControl"), new(typeof(FurnitureTransformPatch), "furnitureTransform"),
                     new(typeof(FurnitureStainPatch), "furnitureStain"),
-                    new(typeof(LightPointPatch), "lightPoint"));
+                    new(typeof(LightPointPatch), "lightPoint"),
+                    new(typeof(HumanTransformPatch), "humanTransform"));
         });
         var options = new JsonSerializerOptions
         {

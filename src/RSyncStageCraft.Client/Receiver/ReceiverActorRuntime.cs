@@ -123,7 +123,8 @@ public sealed class ReceiverActorRuntime : IReceiverActorSessionRuntime
         TimeSpan? maximumCancellationCallbackWait = null,
         IReceiverReadinessPort? localObjectApplyReadiness = null,
         ILocalObjectVisibility? localObjectVisibility = null,
-        TimeSpan? localObjectLoadTimeout = null)
+        TimeSpan? localObjectLoadTimeout = null,
+        HumanActorDesiredSet? humanActors = null)
     {
         ArgumentNullException.ThrowIfNull(dispatcher);
         ArgumentNullException.ThrowIfNull(readiness);
@@ -187,10 +188,12 @@ public sealed class ReceiverActorRuntime : IReceiverActorSessionRuntime
                 localObjectRemoval,
                 LocalObjectRetries,
                 localObjectReadiness);
+            HumanActors = humanActors;
             localObjectIngress = new ReceiverLocalObjectIngress(
                 LocalObjectStore,
                 LocalObjectCoordinator,
-                localObjectFingerprint);
+                localObjectFingerprint,
+                HumanActors);
         }
 
         Events = new ReceiverActorEventIngress(
@@ -203,7 +206,8 @@ public sealed class ReceiverActorRuntime : IReceiverActorSessionRuntime
             LocalObjectStore,
             LocalObjectCoordinator,
             localObjectFingerprint,
-            readiness);
+            readiness,
+            HumanActors);
 
         var sessionCleanup = new ReceiverSessionCleanup(
             Authority,
@@ -212,7 +216,8 @@ public sealed class ReceiverActorRuntime : IReceiverActorSessionRuntime
             this.limits.MaximumCleanupEntriesPerPass,
             LocalObjectCoordinator,
             LocalObjectRetries,
-            LocalObjectStore);
+            LocalObjectStore,
+            HumanActors);
         cleanup = new ReceiverApplyCleanup(
             sessionCleanup,
             this.limits.MaximumCleanupEntriesPerPass,
@@ -228,6 +233,9 @@ public sealed class ReceiverActorRuntime : IReceiverActorSessionRuntime
     internal LocalObjectApplyCoordinator? LocalObjectCoordinator { get; }
     internal LocalObjectApplyRetryQueue? LocalObjectRetries { get; }
     internal LocalObjectOwnershipLedger? LocalObjectLedger { get; }
+
+    /// <summary>Protocol 7: the human apply domain's desired set (with a local-object runtime only).</summary>
+    internal HumanActorDesiredSet? HumanActors { get; }
 
     public ReceiverActorRuntimeSnapshot State
     {

@@ -6,6 +6,7 @@ using Dalamud.Game.Command;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using RSyncStageCraft.Adapters;
+using RSyncStageCraft.Core.Actors;
 using RSyncStageCraft.Core.Actors.Humans;
 using RSyncStageCraft.Core.Appearance;
 
@@ -29,6 +30,12 @@ namespace RSyncStageCraft;
 /// <item>HV-5 M2: <c>spawn &lt;label&gt;</c>, <c>spawn-test-scale &lt;label&gt;</c>, <c>remove</c> and
 /// <c>status</c>, run by <see cref="HumanCatalogueSpawnRun"/>: one actor from
 /// one entry, which is read and never modified.</item>
+/// <item>HV-6: <c>share</c>, <c>unshare</c>, <c>place-shared</c>,
+/// <c>move-shared</c>, <c>remove-shared</c> and <c>shared-status</c>, run by
+/// <see cref="HumanSharedActorRun"/>, which is also the shared human host.
+/// They are routed before HV-5's scene rule: HV-6 needs the server session
+/// that HV-5 refuses, and keeps its own GPose, cutscene, loading-screen and
+/// other-actor checks.</item>
 /// </list>
 /// Capture writes nothing to the game; nothing is uploaded, exported or
 /// synchronized. The reads run on the framework thread, one framework call
@@ -67,6 +74,7 @@ internal sealed class HumanCatalogueRun
     private readonly HumanActorCustomizePlusIpc customizePlus;
     private readonly Func<int> otherRscActors;
     private readonly HumanCatalogueSpawnRun spawn;
+    private readonly HumanSharedActorRun? shared;
     private readonly string? journalRefusal;
     private readonly bool commandAdded;
     private readonly object gate = new();
@@ -88,7 +96,8 @@ internal sealed class HumanCatalogueRun
         string configDirectory,
         Func<int> otherRscActors,
         Func<bool> serverSessionPossible,
-        Action<string> log)
+        Action<string> log,
+        HumanSharedServices? sharedServices = null)
     {
         this.pluginInterface = pluginInterface ?? throw new ArgumentNullException(nameof(pluginInterface));
         this.commands = commands ?? throw new ArgumentNullException(nameof(commands));
@@ -125,6 +134,20 @@ internal sealed class HumanCatalogueRun
         customizePlus = new HumanActorCustomizePlusIpc(pluginInterface, () => 0);
         spawn = new HumanCatalogueSpawnRun(pluginInterface, framework, data, playerState, SpawnSceneExit, Store, CurrentVersions, catalogueRoot,
             process, log);
+        if (sharedServices is not null)
+        {
+            // HV-6's holds keep their own journal beside the catalogue; one kept by an earlier load of this process refuses HV-6's drawing too.
+            var sharedRoot = Path.Combine(configDirectory, HumanSharedActorRun.HoldFolder);
+            var sharedRefusal = HumanCatalogueJournal.AtLoad(sharedRoot, process, out var sharedListed) switch
+            {
+                HumanCatalogueJournalState.SameProcess =>
+                    $"an earlier load of this game process kept {sharedListed} shared file(s) held after an unconfirmed cleanup; shared humans are not drawn until the game restarts",
+                HumanCatalogueJournalState.Unreadable => "the shared humans' retention journal could not be read or cleared; shared humans are not drawn",
+                _ => null,
+            };
+            shared = new HumanSharedActorRun(pluginInterface, framework, data, playerState, SharedSceneExit, Store, CurrentVersions, sharedRoot, process,
+                sharedServices, log, sharedRefusal ?? journalRefusal);
+        }
         commandAdded = commands.AddHandler(Command, new CommandInfo(OnCommand)
         {
             HelpMessage = "HV-5 step, from the Dalamud log window's console only.",
@@ -133,16 +156,23 @@ internal sealed class HumanCatalogueRun
         log(commandAdded
             ? $"RSC HV-5 runner loaded. Steps, typed only in the Dalamud log window's console: {Command} capture <label>, " +
                 $"{Command} capture <label> with-customize+, {Command} list, " +
-                $"{Command} spawn <label>, {Command} spawn-test-scale <label>, {Command} remove, {Command} status."
+                $"{Command} spawn <label>, {Command} spawn-test-scale <label>, {Command} remove, {Command} status." +
+                (shared is null ? string.Empty
+                    : $" HV-6: {Command} share <label>, {Command} unshare <label>, {Command} place-shared <label> (each with an optional with-customize+), " +
+                      $"{Command} move-shared, {Command} remove-shared, {Command} shared-status.")
             : "RSC HV-5 runner loaded without its command; no step can run.");
         if (journalRefusal is not null)
             log("RSC HV-5: " + journalRefusal + ".");
-        // Last: the spawn runner's plugin-list subscription, so a constructor that throws leaves none behind.
+        // Last: the spawn runners' plugin-list subscriptions, so a constructor that throws leaves none behind.
         spawn.Subscribe();
+        shared?.Subscribe();
     }
 
-    /// <summary>1 while HV-5's actor exists; read by the T3-1 and HV-1 to HV-4 runners' scene checks.</summary>
-    internal int LiveCount => spawn.LiveCount;
+    /// <summary>HV-5's and HV-6's actors (each at most 1); read by the T3-1 and HV-1 to HV-4 runners' scene checks.</summary>
+    internal int LiveCount => spawn.LiveCount + (shared?.LiveCount ?? 0);
+
+    /// <summary>HV-6's shared human host, ticked by the connection with the desired shared humans; null when HV-6 is not composed.</summary>
+    internal IHumanActorHostPort? SharedHost => shared;
 
     /// <summary>Game thread, every framework update: the pending step, if any, then the spawn's draw steps.</summary>
     internal void Tick()
@@ -170,6 +200,12 @@ internal sealed class HumanCatalogueRun
             spawn.Step(chosen);
             return;
         }
+        // HV-6: before HV-5's scene rule (its own checks are in the run).
+        if (shared is not null && HumanSharedCommand.TryParse(chosen, out _, out _) != HumanSharedStep.None)
+        {
+            shared.Step(chosen);
+            return;
+        }
         if (stepRunning)
         {
             log("RSC HV-5 refused: a step is still running.");
@@ -181,9 +217,14 @@ internal sealed class HumanCatalogueRun
             return;
         }
         var spawnStep = HumanCatalogueSpawnCommand.TryParse(chosen, out _, out _);
-        if (HumanCatalogueCaptureCommand.TryParse(chosen, out _, out _) && spawn.Busy)
+        if (HumanCatalogueCaptureCommand.TryParse(chosen, out _, out _) && (spawn.Busy || shared?.Busy == true))
         {
             log("RSC HV-5 refused: a spawn is being prepared, an actor exists, or stored files are held; capture after the removal.");
+            return;
+        }
+        if (spawnStep && shared?.Busy == true)
+        {
+            log("RSC HV-5 refused: a shared human is followed or its files are held; spawn after it is gone.");
             return;
         }
         if ((spawnStep ? SpawnSceneExit() : SceneExit()) is { } exit)
@@ -225,6 +266,7 @@ internal sealed class HumanCatalogueRun
         var clock = Stopwatch.StartNew();
         TimeSpan Remaining() => UnloadWait - clock.Elapsed;
         spawn.Shutdown(Remaining);
+        shared?.Shutdown(Remaining);
         Task? task;
         lock (gate)
             task = running;
@@ -252,6 +294,8 @@ internal sealed class HumanCatalogueRun
         if (text is "list" or "remove" or "status")
             step = text;
         else if (HumanCatalogueCaptureCommand.TryParse(text, out _, out _) || HumanCatalogueSpawnCommand.TryParse(text, out _, out _))
+            step = text;
+        else if (shared is not null && HumanSharedCommand.TryParse(text, out _, out _) != HumanSharedStep.None)
             step = text;
         else
         {
@@ -474,7 +518,26 @@ internal sealed class HumanCatalogueRun
             return exit;
         try
         {
-            return otherRscActors() != 0 ? "another RSC actor or puppet is in the scene" : null;
+            return otherRscActors() + (shared?.LiveCount ?? 0) != 0 ? "another RSC actor or puppet is in the scene" : null;
+        }
+        catch (Exception exception)
+        {
+            return $"the scene could not be read ({exception.GetType().Name})";
+        }
+    }
+
+    /// <summary>
+    /// HV-6: the game-state checks (logged in, no GPose, cutscene or loading
+    /// screen) and no other RSC actor or puppet, HV-5's included. Unlike
+    /// <see cref="SceneExit"/>, a server session is required rather than refused.
+    /// </summary>
+    private string? SharedSceneExit()
+    {
+        if (GameStateExit() is { } exit)
+            return exit;
+        try
+        {
+            return otherRscActors() + spawn.LiveCount != 0 ? "another RSC actor or puppet is in the scene" : null;
         }
         catch (Exception exception)
         {
@@ -484,6 +547,21 @@ internal sealed class HumanCatalogueRun
 
     /// <summary>Null while a capture may read; otherwise why not. Total.</summary>
     private string? SceneExit()
+    {
+        if (GameStateExit() is { } exit)
+            return exit;
+        try
+        {
+            return serverSessionPossible() ? "an RSC server session is active or may start" : null;
+        }
+        catch (Exception exception)
+        {
+            return $"the scene could not be read ({exception.GetType().Name})";
+        }
+    }
+
+    /// <summary>Logged in, and no GPose, cutscene or loading screen. Total.</summary>
+    private string? GameStateExit()
     {
         try
         {
@@ -496,8 +574,6 @@ internal sealed class HumanCatalogueRun
                 return "a cutscene is active";
             if (condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51])
                 return "a loading screen is active";
-            if (serverSessionPossible())
-                return "an RSC server session is active or may start";
             return null;
         }
         catch (Exception exception)

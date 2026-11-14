@@ -38,6 +38,7 @@ public sealed class RSyncStageCraftRuntime
 
         Readiness = new ReceiverReadinessCoordinator();
         Connection = new SyncConnectionLock();
+        HumanActors = new HumanActorDesiredSet();
         Receiver = new ReceiverActorRuntime(
             dispatcher,
             Readiness,
@@ -46,7 +47,8 @@ public sealed class RSyncStageCraftRuntime
             localObjectRetryPolicy: localObjectRetryPolicy,
             localObjectApplyReadiness: Readiness.LocalObjects,
             localObjectVisibility: localObjectVisibility,
-            localObjectLoadTimeout: localObjectLoadTimeout);
+            localObjectLoadTimeout: localObjectLoadTimeout,
+            humanActors: HumanActors);
         ControlIngress = new ReceiverControlIngress(Connection, Receiver, Readiness);
         Lifecycle = new SyncReceiverLifecycle(
             Connection,
@@ -79,6 +81,13 @@ public sealed class RSyncStageCraftRuntime
     internal ReceiverReadinessCoordinator Readiness { get; }
     internal SyncConnectionLock Connection { get; }
     internal ReceiverActorRuntime Receiver { get; }
+
+    /// <summary>
+    /// Protocol 7: the shared human actors the server holds for this
+    /// session's scenes. A Release build stores and never draws them; a
+    /// Debug build's human host converges on them.
+    /// </summary>
+    public HumanActorDesiredSet HumanActors { get; }
     public ReceiverControlIngress ControlIngress { get; }
     internal SyncReceiverLifecycle Lifecycle { get; }
     public ClientAuthenticationCoordinator Authentication { get; }

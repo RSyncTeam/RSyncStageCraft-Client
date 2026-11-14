@@ -43,7 +43,8 @@ public sealed class MutationSnapshotResponseTests
         Assert.False(new ObjectControlMessageCodec().TryEncode(envelope with { ProtocolVersion = 3 }, payload, out _, out _));
         Assert.False(new ObjectControlMessageCodec().TryEncode(envelope with { ProtocolVersion = 4 }, payload, out _, out _));
         Assert.False(new ObjectControlMessageCodec().TryEncode(envelope with { ProtocolVersion = 5 }, payload, out _, out _));
-        Assert.Equal(6, ProtocolConstants.CurrentVersion);
+        Assert.False(new ObjectControlMessageCodec().TryEncode(envelope with { ProtocolVersion = 6 }, payload, out _, out _));
+        Assert.Equal(7, ProtocolConstants.CurrentVersion);
     }
 
     [Theory]

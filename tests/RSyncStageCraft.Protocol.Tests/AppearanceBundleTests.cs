@@ -126,12 +126,14 @@ public sealed class AppearanceBundleTests
         Assert.Equal(valid, AppearanceGamePath.IsValid(path));
 
     [Fact]
-    public void TheFileTypeAllowlistIsVersionTwoAndItsVersionOneListIsModelsMaterialsAndTexturesOnly()
+    public void TheFileTypeAllowlistIsVersionThreeAndItsVersionOneListIsModelsMaterialsAndTexturesOnly()
     {
         // Pinned: any change to the allowlist is an explicit, reviewed compatibility decision.
         // Version 2 (AM-4) adds skeleton resources on recognised paths only, for format 2;
+        // version 3 (HV-6, format 3) is exactly the version 2 set;
         // the version-1 list, and so every format-1 manifest, is unchanged.
-        Assert.Equal(2, AppearanceFileTypes.Version);
+        Assert.Equal(3, AppearanceFileTypes.Version);
+        Assert.Equal(AppearanceFileTypes.AllowedFor(2), AppearanceFileTypes.AllowedFor(3));
         Assert.Equal(AppearanceLimits.FormatVersion, AppearanceFileTypes.Version);
         Assert.Equal(new[] { ".mdl", ".mtrl", ".tex" }, AppearanceFileTypes.Allowed);
     }

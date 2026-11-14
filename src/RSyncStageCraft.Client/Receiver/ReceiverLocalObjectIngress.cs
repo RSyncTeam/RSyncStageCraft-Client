@@ -82,17 +82,25 @@ public sealed class ReceiverLocalObjectIngress
     private readonly DesiredLocalObjectStore desiredStore;
     private readonly LocalObjectApplyCoordinator coordinator;
     private readonly ILocalObjectStateFingerprint fingerprint;
+    private readonly HumanActorDesiredSet? humanActors;
 
+    /// <param name="humanActors">
+    /// Protocol 7: the human apply domain's desired set. Human states and
+    /// tombstones go there and never to the local-object store; without it
+    /// they are accepted and not drawn, so the ordered stream still advances.
+    /// </param>
     public ReceiverLocalObjectIngress(
         DesiredLocalObjectStore desiredStore,
         LocalObjectApplyCoordinator coordinator,
-        ILocalObjectStateFingerprint? fingerprint = null)
+        ILocalObjectStateFingerprint? fingerprint = null,
+        HumanActorDesiredSet? humanActors = null)
     {
         ArgumentNullException.ThrowIfNull(desiredStore);
         ArgumentNullException.ThrowIfNull(coordinator);
         this.desiredStore = desiredStore;
         this.coordinator = coordinator;
         this.fingerprint = fingerprint ?? new Sha256LocalObjectStateFingerprint();
+        this.humanActors = humanActors;
     }
 
     public ReceiverLocalObjectIngressResult AcceptState(
@@ -101,6 +109,8 @@ public sealed class ReceiverLocalObjectIngress
     {
         if (!session.IsValid || state is null || !state.IsValid)
             return new(ReceiverLocalObjectIngressStatus.Invalid, default);
+        if (state is HumanActorState human)
+            return AcceptHuman(humanActors?.Advance(session, human) ?? HumanActorDesiredStatus.Accepted);
         if (state is not (ActorState or FurnitureState or LightState))
             return new(ReceiverLocalObjectIngressStatus.UnsupportedKind, default);
 
@@ -166,6 +176,8 @@ public sealed class ReceiverLocalObjectIngress
     {
         if (!session.IsValid || !tombstone.IsValid)
             return new(ReceiverLocalObjectIngressStatus.Invalid, default);
+        if (tombstone.Kind == RscObjectKind.Human)
+            return AcceptHuman(humanActors?.Remove(session, tombstone) ?? HumanActorDesiredStatus.Accepted);
         if (tombstone.Kind is not (RscObjectKind.Actor or RscObjectKind.Furniture or RscObjectKind.Light))
             return new(ReceiverLocalObjectIngressStatus.UnsupportedKind, default);
 
@@ -182,6 +194,19 @@ public sealed class ReceiverLocalObjectIngress
 
         return new(ReceiverLocalObjectIngressStatus.Accepted, removal.Current.Token);
     }
+
+    /// <summary>
+    /// A human change carries no local-object work token: the human host
+    /// converges on the desired set on its own tick.
+    /// </summary>
+    private static ReceiverLocalObjectIngressResult AcceptHuman(HumanActorDesiredStatus status) => new(
+        status switch
+        {
+            HumanActorDesiredStatus.Accepted or HumanActorDesiredStatus.Unchanged => ReceiverLocalObjectIngressStatus.Accepted,
+            HumanActorDesiredStatus.Invalid => ReceiverLocalObjectIngressStatus.Invalid,
+            _ => ReceiverLocalObjectIngressStatus.StateRejected,
+        },
+        default);
 
     private static ReceiverLocalObjectIngressStatus MapAdvanceFailure(
         DesiredLocalObjectAdvanceStatus status) => status switch

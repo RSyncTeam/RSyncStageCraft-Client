@@ -391,8 +391,9 @@ public sealed class SkeletonResourceGroupTests
     {
         // AM-4: allowlist and manifest format 2; the version-1 list and the
         // one-argument check (every existing caller) still refuse skeleton resources.
-        Assert.Equal(2, AppearanceFileTypes.Version);
-        Assert.Equal(2, AppearanceLimits.FormatVersion);
+        // HV-6: version 3 (format 3) is exactly the version 2 set.
+        Assert.Equal(3, AppearanceFileTypes.Version);
+        Assert.Equal(3, AppearanceLimits.FormatVersion);
         Assert.Equal(new[] { ".mdl", ".mtrl", ".tex" }, AppearanceFileTypes.Allowed);
         Assert.False(AppearanceFileTypes.IsAllowed(BaseSklb));
         Assert.False(AppearanceFileTypes.IsAllowed(Deformer));

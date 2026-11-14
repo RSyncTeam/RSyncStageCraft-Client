@@ -88,5 +88,5 @@ internal sealed class ClientControlResponseFrame
         }
     }
 
-    private static bool IsClosedState(AuthoritativeObjectState? state) => state is ActorState or FurnitureState or LightState;
+    private static bool IsClosedState(AuthoritativeObjectState? state) => state is ActorState or FurnitureState or LightState or HumanActorState;
 }

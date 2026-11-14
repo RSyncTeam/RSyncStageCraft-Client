@@ -66,7 +66,7 @@ public sealed class ObjectControlMessageCodecTests
     public void Protocol4FurnitureCarriesTheStainOnTheWireAndRequiresIt()
     {
         var codec = new ObjectControlMessageCodec();
-        Assert.Equal(6, ProtocolConstants.CurrentVersion);
+        Assert.Equal(7, ProtocolConstants.CurrentVersion);
         var state = new FurnitureState(new(Guid.NewGuid()), new(2), new("creator"), null,
             "furniture:indoor:6000", new(1, 2, 3), new(0, 0, 0, 1)) { Stain = 36 };
         Assert.True(codec.TryEncode(Envelope(ObjectProtocolMessageType.ObjectUpdated),

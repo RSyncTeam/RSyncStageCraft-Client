@@ -5,6 +5,9 @@ public enum RscObjectKind
     Actor,
     Furniture,
     Light,
+
+    /// <summary>Protocol 7: a shared human actor drawn from an appearance bundle.</summary>
+    Human,
 }
 
 public readonly record struct RscObjectId(Guid Value)

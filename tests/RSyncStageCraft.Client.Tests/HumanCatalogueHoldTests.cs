@@ -764,9 +764,12 @@ internal sealed class HumanCatalogueFixture
 
     public const string HairSkeleton = "chara/human/c0101/skeleton/hair/h0001/skl_c0101h0001.sklb";
 
-    /// <summary>HV-5 M3: with <paramref name="profile"/>, the entry is captured with the flag and holds that profile.</summary>
+    /// <summary>
+    /// HV-5 M3: with <paramref name="profile"/>, the entry is captured with the flag and holds that profile.
+    /// HV-6: without <paramref name="swap"/>, the capture has no path swap (a shared package carries none).
+    /// </summary>
     public static HumanCatalogueFixture Create(string? customizePlus = CustomizePlusVersion, bool deformer = true, bool hair = false,
-        IReadOnlyList<string>? summary = null, HumanCatalogueProfileRead? profile = null)
+        IReadOnlyList<string>? summary = null, HumanCatalogueProfileRead? profile = null, bool swap = true)
     {
         var fixture = new HumanCatalogueFixture(Path.Combine(Path.GetTempPath(), "rsc-hv5-spawn", Guid.NewGuid().ToString("N")),
             Versions with { CustomizePlus = customizePlus });
@@ -774,8 +777,9 @@ internal sealed class HumanCatalogueFixture
         [
             new(fixture.WriteMod("Body/top.mdl", RandomNumberGenerator.GetBytes(400)), [FakeHumanActorPenumbra.TopModel]),
             new(fixture.WriteMod("Skeletons/skl_c0101b0001.sklb", Sklb()), [FakeHumanActorPenumbra.Skeleton]),
-            new(FakeHumanActorPenumbra.SwapSource, [FakeHumanActorPenumbra.SwapTarget]),
         ];
+        if (swap)
+            resources.Add(new(FakeHumanActorPenumbra.SwapSource, [FakeHumanActorPenumbra.SwapTarget]));
         if (hair)
             resources.Add(new(fixture.WriteMod("Skeletons/skl_c0101h0001.sklb", Sklb()), [HairSkeleton]));
         if (deformer)

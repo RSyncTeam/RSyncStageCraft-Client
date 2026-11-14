@@ -30,7 +30,7 @@ public sealed class LightProtocolTests
     [Fact]
     public void ProtocolFiveIsCurrentAndOnlyLightPointIsCanonical()
     {
-        Assert.Equal(6, ProtocolConstants.CurrentVersion);
+        Assert.Equal(7, ProtocolConstants.CurrentVersion);
         Assert.Equal("light:point", LightIdentity.Point);
         Assert.True(LightIdentity.IsCanonical("light:point"));
         Assert.False(LightIdentity.IsCanonical("light:spot"));

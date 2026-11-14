@@ -149,7 +149,8 @@ public sealed record HumanActorSpawnPlan(
     bool TestScale,
     IHumanActorShowCheck? ShowCheck = null,
     Func<nint, nint>? DrawObject = null,
-    HumanCustomizePlusPayload? Profile = null)
+    HumanCustomizePlusPayload? Profile = null,
+    HumanActorPlacement? Placement = null)
 {
     /// <summary>True when a Customize+ profile is applied before the show: the test scale or the entry's profile.</summary>
     public bool AppliesProfile => TestScale || Profile is not null;
@@ -507,8 +508,8 @@ public sealed class HumanActorBaseline
             log(prefix + $"home world: after the copies {left}, written {HumanActorW3.WorldId} (W-3), read back {worlded.HomeWorld}.");
         }
 
-        // 5. Beside the player, facing them; untargetable.
-        var placement = InFrontOf(beside);
+        // 5. Beside the player, facing them (HV-6: at the plan's placement instead); untargetable.
+        var placement = plan?.Placement ?? InFrontOf(beside);
         if (Write(candidate, "placement", owned => backend.Place(owned, placement)) is { } lostAtPlacement)
             return Lost(lostAtPlacement);
         if (backend.ReadPlacement(address) is not { } placed ||
@@ -521,8 +522,30 @@ public sealed class HumanActorBaseline
             return Halt("untargetable", "the actor is still targetable", candidate);
 
         candidate.Phase = HumanActorPhase.WaitingForReady;
-        log(prefix + $"spawned at global index {candidate.GlobalIndex}: named, player kind, placed beside you, untargetable, " +
+        log(prefix + $"spawned at global index {candidate.GlobalIndex}: named, player kind, {(plan?.Placement is null ? "placed beside you" : "placed where it was shared")}, untargetable, " +
             "alpha 0; waiting to draw.");
+        return true;
+    }
+
+    /// <summary>
+    /// HV-6, on the game thread: moves the actor (any phase) to
+    /// <paramref name="placement"/>, with checks 1–5 before the write and the
+    /// placement read back after it. A placement that does not read back is a
+    /// stop (the actor is deleted). False when nothing was moved.
+    /// </summary>
+    public bool Move(HumanActorPlacement placement)
+    {
+        if (actor is not { } current)
+            return Refuse("no actor exists to move");
+        if (!float.IsFinite(placement.Position.X) || !float.IsFinite(placement.Position.Y) || !float.IsFinite(placement.Position.Z) ||
+            !float.IsFinite(placement.Rotation))
+            return Refuse("the placement is not finite");
+        if (Write(current, "move", owned => backend.Place(owned, placement)) is { } lost)
+            return Lost(lost);
+        if (backend.ReadPlacement(current.Address) is not { } placed ||
+            Vector3.Distance(placed.Position, placement.Position) > PlacementTolerance ||
+            MathF.Abs(placed.Rotation - placement.Rotation) > PlacementTolerance)
+            return Halt("move", "the placement did not read back", current);
         return true;
     }
 

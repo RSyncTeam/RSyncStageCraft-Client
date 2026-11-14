@@ -286,13 +286,16 @@ public sealed class AppearanceManifestFormatTwoTests
         Assert.Equal(formatOne, entry.IsValidFor(1));
         Assert.Equal(formatTwo, entry.IsValidFor(2));
         Assert.False(entry.IsValidFor(0));
-        Assert.False(entry.IsValidFor(3));
+        // HV-6: format 3 (the human package) uses exactly the v2 allowlist; format 4 is unknown.
+        Assert.Equal(formatTwo, entry.IsValidFor(3));
+        Assert.False(entry.IsValidFor(4));
 
         Assert.Equal(formatOne, AppearanceFileTypes.IsAllowed(path));
         Assert.Equal(formatOne, AppearanceFileTypes.IsAllowed(path, 1));
         Assert.Equal(formatTwo, AppearanceFileTypes.IsAllowed(path, 2));
         Assert.False(AppearanceFileTypes.IsAllowed(path, 0));
-        Assert.False(AppearanceFileTypes.IsAllowed(path, 3));
+        Assert.Equal(formatTwo, AppearanceFileTypes.IsAllowed(path, 3));
+        Assert.False(AppearanceFileTypes.IsAllowed(path, 4));
     }
 
     [Fact]
@@ -303,10 +306,14 @@ public sealed class AppearanceManifestFormatTwoTests
         Assert.Equal(1, AppearanceFileTypes.VersionForFormat(1));
         Assert.Equal(2, AppearanceFileTypes.VersionForFormat(2));
         Assert.Equal(0, AppearanceFileTypes.VersionForFormat(0));
-        Assert.Equal(0, AppearanceFileTypes.VersionForFormat(3));
+        // HV-6: format 3 (the human package) uses allowlist v3, exactly the v2 set; format 4 is unknown.
+        Assert.Equal(3, AppearanceLimits.HumanPackageFormatVersion);
+        Assert.Equal(3, AppearanceFileTypes.VersionForFormat(3));
+        Assert.Equal(0, AppearanceFileTypes.VersionForFormat(4));
         Assert.Equal(new[] { ".mdl", ".mtrl", ".tex" }, AppearanceFileTypes.AllowedFor(1));
         Assert.Equal(new[] { ".mdl", ".mtrl", ".tex", ".sklb", ".phyb", ".pbd" }, AppearanceFileTypes.AllowedFor(2));
-        Assert.Empty(AppearanceFileTypes.AllowedFor(3));
+        Assert.Equal(AppearanceFileTypes.AllowedFor(2), AppearanceFileTypes.AllowedFor(3));
+        Assert.Empty(AppearanceFileTypes.AllowedFor(4));
     }
 
     // ---------- the one reported deformer alias ----------

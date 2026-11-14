@@ -48,6 +48,7 @@ public sealed class ReceiverActorSnapshotIngress
     private readonly ILocalObjectStateFingerprint? localObjectFingerprint;
     private readonly IReceiverReadinessPort? readiness;
     private readonly IReceiverReadinessAdmissionFence? readinessAdmissionFence;
+    private readonly HumanActorDesiredSet? humanActors;
     private readonly Queue<LocalObjectApplyToken> pending = new();
     private ReceiverSessionKey? stagedSession;
     private ServerSequence stagedWatermark;
@@ -58,10 +59,12 @@ public sealed class ReceiverActorSnapshotIngress
         DesiredLocalObjectStore? localObjectStore = null,
         LocalObjectApplyCoordinator? localObjectCoordinator = null,
         ILocalObjectStateFingerprint? localObjectFingerprint = null,
-        IReceiverReadinessPort? readiness = null)
+        IReceiverReadinessPort? readiness = null,
+        HumanActorDesiredSet? humanActors = null)
     {
         ArgumentNullException.ThrowIfNull(authority);
         ArgumentNullException.ThrowIfNull(eventIngress);
+        this.humanActors = humanActors;
         if ((localObjectStore is null) != (localObjectCoordinator is null))
         {
             throw new ArgumentException(
@@ -152,6 +155,12 @@ public sealed class ReceiverActorSnapshotIngress
             return Result(ReceiverActorSnapshotStatus.Invalid, snapshot.Watermark);
         }
 
+        // Protocol 7: the snapshot's humans replace the human domain's desired
+        // set in the same authority commit; they never reach the local store.
+        var humanStates = humanActors is null
+            ? Array.Empty<HumanActorState>()
+            : prepared.Objects.OfType<HumanActorState>().ToArray();
+
         var localTombstones = localObjectStore is null
             ? Array.Empty<ObjectTombstone>()
             : prepared.Tombstones
@@ -180,6 +189,9 @@ public sealed class ReceiverActorSnapshotIngress
                     receiverSession,
                     () =>
                     {
+                        if (humanActors is not null && !HumanActorDesiredSet.CanApplySnapshot(humanStates.Length))
+                            return false;
+
                         if (localObjectStore is not null)
                         {
                             var localValidation = localObjectStore.ValidateSnapshot(
@@ -204,6 +216,7 @@ public sealed class ReceiverActorSnapshotIngress
                             }
                         }
 
+                        humanActors?.ApplySnapshot(receiverSession, humanStates);
                         return true;
                     },
                     out var committed);
