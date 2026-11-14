@@ -29,6 +29,7 @@ public sealed class ProtocolPurityTests
         "Protocol/ActorContracts.cs",
         "Protocol/ControlResponseMessages.cs",
         "Protocol/FurnitureIdentity.cs",
+        "Protocol/HumanActorContracts.cs",
         "Protocol/LightContracts.cs",
         "Protocol/ObjectControlMessageCodec.cs",
         "Protocol/ObjectPatchContracts.cs",

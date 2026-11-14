@@ -358,8 +358,10 @@ public sealed class HumanCatalogueStore
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
             }
-            // The file name must be the entry's own id.
-            if (entry is not null && Path.GetFileNameWithoutExtension(file) == entry.EntryId.ToString("N"))
+            // The file name must be the entry's own id. HV-6: a received entry is
+            // never written here, so one found in this folder is unreadable.
+            if (entry is not null && entry.Format != HumanCatalogueEntry.SharedFormat &&
+                Path.GetFileNameWithoutExtension(file) == entry.EntryId.ToString("N"))
                 found.Add(entry);
             else
                 unreadable++;

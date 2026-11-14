@@ -8,7 +8,7 @@ namespace RSyncStageCraft.Core.Appearance;
 // The immutable,
 // owner-authored appearance bundle as a pure contract. Nothing here touches
 // Penumbra, Glamourer, Customize+, the game, the network or the disk; it is
-// not on the wire yet (protocol 6 is unchanged).
+// not on the object wire: protocol 7 human actors name a bundle only by its id.
 
 /// <summary>
 /// A SHA-256 content hash: exactly 64 lowercase hexadecimal characters. The
@@ -84,15 +84,30 @@ public static class AppearanceLimits
     /// <summary>
     /// The newest bundle manifest format this build understands. Each manifest
     /// carries its own format (<see cref="AppearanceBundleManifest.FormatVersion"/>):
-    /// 1 for a bundle without a skeleton group, 2 only for one with a group.
+    /// 1 for a bundle without a skeleton group, 2 only for one with a group,
+    /// 3 only for a human package (HV-6).
     /// </summary>
-    public const int FormatVersion = 2;
+    public const int FormatVersion = 3;
 
     /// <summary>The format of every bundle without a skeleton group (allowlist v1); its bytes never change.</summary>
     public const int FirstFormatVersion = 1;
 
     /// <summary>The format of a bundle that carries a skeleton group (allowlist v2).</summary>
     public const int SkeletonGroupFormatVersion = 2;
+
+    /// <summary>
+    /// The format of a human package (HV-6, allowlist v3 = the v2 set): it
+    /// carries the <c>human</c> member (facts and Glamourer reference), and a
+    /// skeleton group only when it has skeleton resources.
+    /// </summary>
+    public const int HumanPackageFormatVersion = 3;
+
+    /// <summary>Format 3 declared-size bounds; formats 1 and 2 are unchanged.</summary>
+    public const long MaximumHumanGlamourerBytes = 1L * 1024 * 1024;
+    public const long MaximumHumanPenumbraMetaBytes = 8L * 1024 * 1024;
+    public const long MaximumHumanCustomizePlusBytes = 256L * 1024;
+    public const long MaximumHumanFactsBytes = 256L * 1024;
+    public const long MaximumHumanGlamourerReferenceBytes = 8L * 1024 * 1024;
     public const int MaximumFiles = 4096;
     public const long MaximumBlobBytes = 64L * 1024 * 1024;
     public const long MaximumBundleBytes = 1024L * 1024 * 1024;
@@ -124,8 +139,8 @@ public static class AppearanceLimits
 /// </summary>
 public static class AppearanceFileTypes
 {
-    /// <summary>The newest allowlist version; equal to <see cref="AppearanceLimits.FormatVersion"/>.</summary>
-    public const int Version = 2;
+    /// <summary>The newest allowlist version; equal to <see cref="AppearanceLimits.FormatVersion"/>. Version 3 is exactly the version 2 set.</summary>
+    public const int Version = 3;
 
     /// <summary>
     /// The allowlist v1 extensions. Unchanged by version 2: the
@@ -142,13 +157,14 @@ public static class AppearanceFileTypes
     public static IReadOnlyList<string> AllowedFor(int version) => version switch
     {
         1 => Allowed,
-        2 => AllowedVersion2,
+        2 or 3 => AllowedVersion2,
         _ => [],
     };
 
     /// <summary>The allowlist version a manifest format uses (format N uses version N); 0 for an unknown format.</summary>
     public static int VersionForFormat(int formatVersion) =>
-        formatVersion is AppearanceLimits.FirstFormatVersion or AppearanceLimits.SkeletonGroupFormatVersion ? formatVersion : 0;
+        formatVersion is AppearanceLimits.FirstFormatVersion or AppearanceLimits.SkeletonGroupFormatVersion
+            or AppearanceLimits.HumanPackageFormatVersion ? formatVersion : 0;
 
     /// <summary>Allowlist v1: true only when the game path's file extension is exactly one of <see cref="Allowed"/>.</summary>
     public static bool IsAllowed(string? gamePath) => IsAllowed(gamePath, 1);
@@ -161,7 +177,7 @@ public static class AppearanceFileTypes
     public static bool IsAllowed(string? gamePath, int version) => version switch
     {
         1 => HasV1Extension(gamePath),
-        2 => HasV1Extension(gamePath) || SkeletonResourcePaths.TryClassify(gamePath, out _),
+        2 or 3 => HasV1Extension(gamePath) || SkeletonResourcePaths.TryClassify(gamePath, out _),
         _ => false,
     };
 
@@ -222,6 +238,24 @@ public enum AppearanceManifestReadOptions
 
     /// <summary>Format 1, and format 2 (a bundle with a skeleton group). Only explicitly gated callers use this.</summary>
     AllowSkeletonGroups = 1,
+
+    /// <summary>Formats 1, 2 and 3 (a human package, HV-6). Only explicitly gated callers use this.</summary>
+    AllowHumanPackages = 2,
+}
+
+/// <summary>
+/// Format 3 only: the human package member. <see cref="Facts"/> is the
+/// canonical <c>rsc-human-facts-1</c> JSON (race, clan, gender, body type,
+/// the versions at capture, the skeleton summary and the profile counts);
+/// <see cref="GlamourerReference"/> is the structured Glamourer reference.
+/// Both are ordinary blobs of the bundle. The server checks only their
+/// declared sizes; every receiver validates their content.
+/// </summary>
+public sealed record AppearanceHumanPackage(AppearanceBlobRef Facts, AppearanceBlobRef GlamourerReference)
+{
+    public bool IsValid =>
+        Facts is { IsValid: true } && Facts.Size <= AppearanceLimits.MaximumHumanFactsBytes &&
+        GlamourerReference is { IsValid: true } && GlamourerReference.Size <= AppearanceLimits.MaximumHumanGlamourerReferenceBytes;
 }
 
 /// <summary>
@@ -251,7 +285,8 @@ public sealed record AppearanceBundleManifest
         AppearanceBlobRef? penumbraMeta,
         AppearanceBlobRef? customizePlus,
         IReadOnlyList<AppearanceFileEntry> files,
-        SkeletonResourceGroup? skeletonGroup)
+        SkeletonResourceGroup? skeletonGroup,
+        AppearanceHumanPackage? human)
     {
         OwnerId = ownerId;
         Glamourer = glamourer;
@@ -259,12 +294,13 @@ public sealed record AppearanceBundleManifest
         CustomizePlus = customizePlus;
         Files = files;
         SkeletonGroup = skeletonGroup;
-        FormatVersion = skeletonGroup is null ? AppearanceLimits.FirstFormatVersion : AppearanceLimits.SkeletonGroupFormatVersion;
+        Human = human;
+        FormatVersion = FormatFor(skeletonGroup is not null, human is not null);
         CanonicalBytes = WriteCanonical();
         BundleId = ContentHash.Of(CanonicalBytes);
     }
 
-    /// <summary>This manifest's own format: 1 without a skeleton group, 2 with one.</summary>
+    /// <summary>This manifest's own format: 1 without a skeleton group, 2 with one, 3 for a human package.</summary>
     public int FormatVersion { get; }
     public RscUserId OwnerId { get; }
     public AppearanceBlobRef Glamourer { get; }
@@ -272,10 +308,13 @@ public sealed record AppearanceBundleManifest
     public AppearanceBlobRef? CustomizePlus { get; }
     public IReadOnlyList<AppearanceFileEntry> Files { get; }
 
-    /// <summary>Format 2 only: the skeleton group (its target race and its members, which are also in <see cref="Files"/>); null in format 1.</summary>
+    /// <summary>Formats 2 and 3: the skeleton group (its target race and its members, which are also in <see cref="Files"/>); null in format 1, optional in format 3.</summary>
     public SkeletonResourceGroup? SkeletonGroup { get; }
 
-    /// <summary>Format 2 only: the playable race code the skeleton group is for; null in format 1.</summary>
+    /// <summary>Format 3 only: the human package member; null in formats 1 and 2.</summary>
+    public AppearanceHumanPackage? Human { get; }
+
+    /// <summary>Formats 2 and 3: the playable race code the skeleton group is for; null without a group.</summary>
     public ushort? SkeletonGroupTargetRace => SkeletonGroup?.RaceCode;
 
     /// <summary>The canonical UTF-8 JSON of this manifest (the only accepted form).</summary>
@@ -286,7 +325,7 @@ public sealed record AppearanceBundleManifest
 
     /// <summary>Every distinct blob this bundle needs (each hash once).</summary>
     public IReadOnlyList<AppearanceBlobRef> Blobs =>
-        AllBlobs(Glamourer, PenumbraMeta, CustomizePlus, Files)
+        AllBlobs(Glamourer, PenumbraMeta, CustomizePlus, Files, Human)
             .GroupBy(blob => blob.Hash)
             .Select(group => group.First())
             .ToArray();
@@ -324,12 +363,49 @@ public sealed record AppearanceBundleManifest
         ushort? skeletonGroupTargetRace,
         out string? error)
     {
-        error = Validate(ownerId, glamourer, penumbraMeta, customizePlus, files, skeletonGroupTargetRace, out var sorted, out var group);
+        error = Validate(ownerId, glamourer, penumbraMeta, customizePlus, files, skeletonGroupTargetRace, null, out var sorted, out var group);
         if (error is not null)
             return null;
         try
         {
-            return new AppearanceBundleManifest(ownerId, glamourer, penumbraMeta, customizePlus, sorted!, group);
+            return new AppearanceBundleManifest(ownerId, glamourer, penumbraMeta, customizePlus, sorted!, group, null);
+        }
+        catch (ArgumentException)
+        {
+            // Text the canonical writer cannot encode (e.g. a lone surrogate in the owner id).
+            error = "The owner is invalid.";
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Builds a format-3 human package (HV-6). The skeleton group is optional:
+    /// with <paramref name="skeletonGroupTargetRace"/> the skeleton-resource
+    /// files must form one whole group for that race, as in format 2; without
+    /// it, no file may be a skeleton resource. Allowlist v3 (the v2 set) and
+    /// the format-3 declared-size bounds apply.
+    /// </summary>
+    public static AppearanceBundleManifest? TryCreateHumanPackage(
+        RscUserId ownerId,
+        AppearanceBlobRef glamourer,
+        AppearanceBlobRef? penumbraMeta,
+        AppearanceBlobRef? customizePlus,
+        IEnumerable<AppearanceFileEntry> files,
+        ushort? skeletonGroupTargetRace,
+        AppearanceHumanPackage human,
+        out string? error)
+    {
+        if (human is null)
+        {
+            error = "The human package member is missing.";
+            return null;
+        }
+        error = Validate(ownerId, glamourer, penumbraMeta, customizePlus, files, skeletonGroupTargetRace, human, out var sorted, out var group);
+        if (error is not null)
+            return null;
+        try
+        {
+            return new AppearanceBundleManifest(ownerId, glamourer, penumbraMeta, customizePlus, sorted!, group, human);
         }
         catch (ArgumentException)
         {
@@ -351,7 +427,8 @@ public sealed record AppearanceBundleManifest
     /// <summary>
     /// As <see cref="TryParse(ReadOnlySpan{byte}, out string?)"/>; with
     /// <see cref="AppearanceManifestReadOptions.AllowSkeletonGroups"/> a
-    /// canonical format-2 manifest is also read.
+    /// canonical format-2 manifest is also read; with
+    /// <see cref="AppearanceManifestReadOptions.AllowHumanPackages"/>, formats 2 and 3.
     /// </summary>
     public static AppearanceBundleManifest? TryParse(ReadOnlySpan<byte> utf8, AppearanceManifestReadOptions options, out string? error)
     {
@@ -392,7 +469,9 @@ public sealed record AppearanceBundleManifest
         }
         var format = root.GetProperty("formatVersion").GetInt32();
         var readable = format == AppearanceLimits.FirstFormatVersion ||
-            (format == AppearanceLimits.SkeletonGroupFormatVersion && options == AppearanceManifestReadOptions.AllowSkeletonGroups);
+            (format == AppearanceLimits.SkeletonGroupFormatVersion &&
+                options is AppearanceManifestReadOptions.AllowSkeletonGroups or AppearanceManifestReadOptions.AllowHumanPackages) ||
+            (format == AppearanceLimits.HumanPackageFormatVersion && options == AppearanceManifestReadOptions.AllowHumanPackages);
         if (!readable)
         {
             error = "Unsupported manifest format version.";
@@ -424,6 +503,30 @@ public sealed record AppearanceBundleManifest
             }
             target = race;
         }
+        if (format == AppearanceLimits.HumanPackageFormatVersion)
+        {
+            // Format 3: the group is optional (null without skeleton resources);
+            // the human member is required.
+            var group = root.GetProperty("skeletonGroup");
+            if (group.ValueKind != JsonValueKind.Null)
+            {
+                if (group.ValueKind != JsonValueKind.Object || !group.GetProperty("targetRace").TryGetUInt16(out var race))
+                {
+                    error = "The manifest's skeleton group is invalid.";
+                    return null;
+                }
+                target = race;
+            }
+            var human = root.GetProperty("human");
+            var facts = human.ValueKind == JsonValueKind.Object ? ReadBlob(human.GetProperty("facts")) : null;
+            var reference = human.ValueKind == JsonValueKind.Object ? ReadBlob(human.GetProperty("glamourerReference")) : null;
+            if (facts is null || reference is null)
+            {
+                error = "The manifest's human package member is invalid.";
+                return null;
+            }
+            return TryCreateHumanPackage(owner, glamourer, meta, customize, files, target, new AppearanceHumanPackage(facts, reference), out error);
+        }
         // The canonical comparison afterwards refuses any member the format does not have.
         return TryCreate(owner, glamourer, meta, customize, files, target, out error);
     }
@@ -447,12 +550,13 @@ public sealed record AppearanceBundleManifest
         AppearanceBlobRef? customizePlus,
         IEnumerable<AppearanceFileEntry> files,
         ushort? skeletonGroupTargetRace,
+        AppearanceHumanPackage? human,
         out IReadOnlyList<AppearanceFileEntry>? sorted,
         out SkeletonResourceGroup? group)
     {
         sorted = null;
         group = null;
-        var format = skeletonGroupTargetRace is null ? AppearanceLimits.FirstFormatVersion : AppearanceLimits.SkeletonGroupFormatVersion;
+        var format = FormatFor(skeletonGroupTargetRace is not null, human is not null);
         var allowlist = AppearanceFileTypes.VersionForFormat(format);
         if (!ownerId.IsValid)
             return "The owner is invalid.";
@@ -462,6 +566,18 @@ public sealed record AppearanceBundleManifest
             return "The Penumbra meta reference is invalid.";
         if (customizePlus is { IsValid: false })
             return "The Customize+ profile reference is invalid.";
+        if (human is not null)
+        {
+            // Format 3 declared-size bounds. The server checks only these and the group.
+            if (!human.IsValid)
+                return "The human package member is invalid or too large.";
+            if (glamourer.Size > AppearanceLimits.MaximumHumanGlamourerBytes)
+                return "The Glamourer state is too large for a human package.";
+            if (penumbraMeta is { } meta && meta.Size > AppearanceLimits.MaximumHumanPenumbraMetaBytes)
+                return "The Penumbra meta manipulations are too large for a human package.";
+            if (customizePlus is { } profile && profile.Size > AppearanceLimits.MaximumHumanCustomizePlusBytes)
+                return "The Customize+ profile is too large for a human package.";
+        }
         if (files is null)
             return "The file list is missing.";
         var list = files.ToList();
@@ -484,7 +600,7 @@ public sealed record AppearanceBundleManifest
                 return "A game path appears more than once.";
         }
         // One hash names one content: the same hash with two sizes is inconsistent.
-        var blobs = AllBlobs(glamourer, penumbraMeta, customizePlus, ordered);
+        var blobs = AllBlobs(glamourer, penumbraMeta, customizePlus, ordered, human);
         long total = 0;
         foreach (var blobGroup in blobs.GroupBy(blob => blob.Hash))
         {
@@ -507,15 +623,26 @@ public sealed record AppearanceBundleManifest
                 return $"The skeleton group is invalid ({assembled.Refusal}).";
             group = assembled.Group;
         }
+        else if (human is not null && ordered.Any(file => SkeletonResourcePaths.TryClassify(file.GamePath, out _)))
+        {
+            // Format 3 without a group: a skeleton resource never travels outside one.
+            return "A skeleton resource needs a skeleton group.";
+        }
         sorted = ordered;
         return null;
     }
+
+    private static int FormatFor(bool hasSkeletonGroup, bool isHumanPackage) =>
+        isHumanPackage ? AppearanceLimits.HumanPackageFormatVersion
+        : hasSkeletonGroup ? AppearanceLimits.SkeletonGroupFormatVersion
+        : AppearanceLimits.FirstFormatVersion;
 
     private static IEnumerable<AppearanceBlobRef> AllBlobs(
         AppearanceBlobRef glamourer,
         AppearanceBlobRef? penumbraMeta,
         AppearanceBlobRef? customizePlus,
-        IEnumerable<AppearanceFileEntry> files)
+        IEnumerable<AppearanceFileEntry> files,
+        AppearanceHumanPackage? human)
     {
         yield return glamourer;
         if (penumbraMeta is not null)
@@ -524,6 +651,14 @@ public sealed record AppearanceBundleManifest
             yield return customizePlus;
         foreach (var file in files)
             yield return file.Content;
+        if (human is not null)
+        {
+            // Format 3: the facts and the Glamourer reference are ordinary
+            // blobs, so upload, quotas, read authorization, collection and the
+            // consistency check all cover them.
+            yield return human.Facts;
+            yield return human.GlamourerReference;
+        }
     }
 
     private byte[] WriteCanonical()
@@ -550,7 +685,28 @@ public sealed record AppearanceBundleManifest
                 writer.WriteEndObject();
             }
             writer.WriteEndArray();
-            if (SkeletonGroup is { } group)
+            if (Human is { } human)
+            {
+                // Format 3: the group member is always present (null without
+                // skeleton resources), followed by the human member.
+                if (SkeletonGroup is { } humanGroup)
+                {
+                    writer.WriteStartObject("skeletonGroup");
+                    writer.WriteNumber("targetRace", humanGroup.RaceCode);
+                    writer.WriteEndObject();
+                }
+                else
+                {
+                    writer.WriteNull("skeletonGroup");
+                }
+                writer.WriteStartObject("human");
+                writer.WritePropertyName("facts");
+                WriteBlob(writer, human.Facts);
+                writer.WritePropertyName("glamourerReference");
+                WriteBlob(writer, human.GlamourerReference);
+                writer.WriteEndObject();
+            }
+            else if (SkeletonGroup is { } group)
             {
                 // Format 2 only; format 1 has no such member and its bytes are unchanged.
                 writer.WriteStartObject("skeletonGroup");

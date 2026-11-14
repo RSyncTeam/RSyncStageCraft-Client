@@ -38,6 +38,8 @@ internal sealed class PluginConnection
     private volatile bool actorsWereSuppressed;
     private readonly object gate = new();
     private string accessKey;
+    // Protocol 7: the shared human host. Release: UnavailableHumanActorHost (draws nothing); a Debug dev plugin: HV-6's host.
+    private readonly IHumanActorHostPort humanHost;
 #if RSC_DEVELOPMENT
     // T3-1 only: null unless a Debug build is loaded as a dev plugin.
     private readonly HumanPuppetT3Run? t31;
@@ -178,10 +180,13 @@ internal sealed class PluginConnection
         // Penumbra and Glamourer calls on the framework thread.
         // If the disposable cache folder cannot be prepared, only appearances
         // are unavailable; the rest of the plugin loads.
+        humanHost = new UnavailableHumanActorHost(log);
+        AppearanceBlobCache? appearanceCache = null;
+        AppearanceTransferClient? appearanceTransfer = null;
         try
         {
-            var appearanceCache = new AppearanceBlobCache(paths.AppearanceCacheDirectory);
-            var appearanceTransfer = new AppearanceTransferClient(CurrentSettings, appearanceCache);
+            appearanceCache = new AppearanceBlobCache(paths.AppearanceCacheDirectory);
+            appearanceTransfer = new AppearanceTransferClient(CurrentSettings, appearanceCache);
             // Skeleton groups: a Debug build loaded as a dev plugin only, and
             // preview only. DevelopmentBuild.Enabled is a constant false in
             // Release, so a Release build never captures one.
@@ -203,6 +208,8 @@ internal sealed class PluginConnection
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            appearanceCache = null;
+            appearanceTransfer = null;
             Appearance = null;
             AppearanceCopy = null;
             log("RSC appearances are unavailable: the appearance cache folder could not be prepared.");
@@ -288,15 +295,24 @@ internal sealed class PluginConnection
                 log($"RSC HV-4 runner not loaded ({exception.GetType().Name}).");
             }
             // HV-5: the local catalogue's capture and list (M1), and one spawn from an entry (M2), under the same refusals.
+            // HV-6: the shared human host and its steps, composed inside HV-5's runner (it needs the appearance transfer and cache).
             try
             {
+                var sharedServices = appearanceCache is not null && appearanceTransfer is not null
+                    ? new HumanSharedServices(appearanceTransfer, appearanceCache, Editor, () => Service.SelfUserId, () => location.Current?.Scene)
+                    : null;
                 hv5 = new HumanCatalogueRun(pluginInterface, commands, framework, clientState, condition, objects, data, playerState,
                     paths.ConfigDirectory,
                     () => actors.OwnedCount + (int)Math.Min(actors.AbandonedCount, int.MaxValue - ActorCapacityPolicy.ActiveMaximumActorsPerScene) +
                         (t31?.OccupiedSlots ?? 0) + (hv1?.LiveCount ?? 0) + (hv2?.LiveCount ?? 0) + (hv3?.LiveCount ?? 0) + (hv4?.LiveCount ?? 0),
                     () => Service.Status.State is not (ServerConnectionState.Disabled or ServerConnectionState.NotConfigured
                         or ServerConnectionState.SignInRefused or ServerConnectionState.Stopped),
-                    log);
+                    log,
+                    sharedServices);
+                if (hv5.SharedHost is { } sharedHost)
+                    humanHost = sharedHost;
+                else
+                    log("RSC HV-6 not composed: appearances are unavailable.");
             }
             catch (Exception exception)
             {
@@ -431,6 +447,9 @@ internal sealed class PluginConnection
         hv4?.Shutdown();
         hv5?.Shutdown();
 #endif
+        // Protocol 7: idempotent (HV-6's host was already unloaded by HV-5's runner above); bounded like every other unload step.
+        var humanClock = System.Diagnostics.Stopwatch.StartNew();
+        humanHost.Shutdown(() => ShutdownWait - humanClock.Elapsed);
         location.Changed -= OnLocationChanged;
         framework.Update -= OnFrameworkUpdate;
         // Unload ends any drag; freeing the furniture below ends its preview.
@@ -506,6 +525,15 @@ internal sealed class PluginConnection
             log($"RSC actor controls error ({exception.GetType().Name}).");
         }
         ReportAbandonedActors();
+        try
+        {
+            // Protocol 7: the shared human host converges on the desired shared humans (Release: reports each once as not drawn).
+            humanHost.Tick(Runtime.HumanActors.Read());
+        }
+        catch (Exception exception)
+        {
+            log($"RSC shared human host error ({exception.GetType().Name}).");
+        }
 #if RSC_DEVELOPMENT
         try
         {

@@ -138,9 +138,11 @@ public sealed class ReleaseDebugSeparationTests
     [Fact]
     public void NothingInThePluginReceivesASkeletonGroup()
     {
-        // Receiving a skeleton group is not wired: no plugin method constructs,
-        // copies, reads or sets the receive options, calls HoldBundleAsync,
-        // touches a bundle hold or uses the Debug skeleton-group receiver.
+        // Receiving a skeleton group through the W1 receiver is not wired: no
+        // plugin method constructs, copies, reads or sets the receive options,
+        // calls HoldBundleAsync, touches a bundle hold or uses the Debug
+        // skeleton-group receiver. (HV-6, Debug only, receives a format-3
+        // human package through the appearance cache instead; the next tests.)
         const string options = "RSyncStageCraft.Core.Appearance.AppearanceReceiveOptions";
         const string hold = "RSyncStageCraft.Core.Appearance.AppearanceBundleHold";
         const string client = "RSyncStageCraft.Core.Appearance.AppearanceTransferClient";
@@ -355,13 +357,15 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv1RunType && target.Name == ".ctor").ToArray());
-        // HV-2, HV-3, HV-4 and HV-5 M2's spawn compose the same native adapter and baseline in their own runners.
-        // Ordinal order: HumanActorBaselineRun, HumanActorCustomizePlusRun, HumanActorGlamourerRun, HumanActorPenumbraRun, HumanCatalogueSpawnRun.
-        Assert.Equal(new[] { Hv1RunType, Hv4RunType, Hv3RunType, Hv2RunType, Hv5SpawnRunType },
+        // HV-2, HV-3, HV-4, HV-5 M2's spawn and HV-6's shared host compose the same native adapter and baseline in their own runners.
+        // Ordinal order: HumanActorBaselineRun, HumanActorCustomizePlusRun, HumanActorGlamourerRun, HumanActorPenumbraRun, HumanCatalogueSpawnRun,
+        // HumanSharedActorRun.
+        Assert.Equal(new[] { Hv1RunType, Hv4RunType, Hv3RunType, Hv2RunType, Hv5SpawnRunType, Hv6RunType },
             Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor").Select(caller => caller.Type).Order(StringComparer.Ordinal));
         Assert.All(Plugin.Callers(target => target.Type == Hv1NativeType && target.Name == ".ctor"), caller => Assert.Equal(".ctor", caller.Name));
-        // Ordinal order: HumanActorBaselineRun, HumanActorCustomizePlusRun, HumanActorGlamourerRun, HumanActorPenumbraRun, HumanCatalogueSpawnRun.
-        Assert.Equal(new[] { Hv1RunType, Hv4RunType, Hv3RunType, Hv2RunType, Hv5SpawnRunType },
+        // Ordinal order: HumanActorBaselineRun, HumanActorCustomizePlusRun, HumanActorGlamourerRun, HumanActorPenumbraRun, HumanCatalogueSpawnRun,
+        // HumanSharedActorRun.
+        Assert.Equal(new[] { Hv1RunType, Hv4RunType, Hv3RunType, Hv2RunType, Hv5SpawnRunType, Hv6RunType },
             Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor").Select(caller => caller.Type)
                 .Order(StringComparer.Ordinal));
         Assert.All(Plugin.ReferenceCallers(target => target.Type == Hv1BaselineType && target.Name == ".ctor"),
@@ -403,13 +407,13 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv2RunType && target.Name == ".ctor").ToArray());
-        // HV-3, HV-4 and HV-5 M2's spawn compose the same Penumbra adapter and stage in their own runners;
+        // HV-3, HV-4, HV-5 M2's spawn and HV-6's shared host compose the same Penumbra adapter and stage in their own runners;
         // HV-5 M1's runner composes the adapter only, for its manipulations read (no stage, so no Penumbra write).
         Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv2RunType, ".ctor"),
-                new MethodName(Hv5RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor") },
+                new MethodName(Hv5RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor"), new MethodName(Hv6RunType, ".ctor") },
             Plugin.Callers(target => target.Type == Hv2PenumbraType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal).ToArray());
         Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv2RunType, ".ctor"),
-                new MethodName(Hv5SpawnRunType, ".ctor") },
+                new MethodName(Hv5SpawnRunType, ".ctor"), new MethodName(Hv6RunType, ".ctor") },
             Plugin.ReferenceCallers(target => target.Type == Hv2StageType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
                 .ToArray());
         var metaCallers = Plugin.ReferenceCallers(target => target.Type == "Penumbra.Api.IpcSubscribers.GetMetaManipulations").ToArray();
@@ -522,13 +526,14 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv3RunType && target.Name == ".ctor").ToArray());
-        // HV-4 and HV-5 M2's spawn compose the same Glamourer adapter and stage in their own runners; HV-5 M1's
+        // HV-4, HV-5 M2's spawn and HV-6's shared host compose the same Glamourer adapter and stage in their own runners; HV-5 M1's
         // runner composes the adapter only, for its structured state read with key 0 (no stage, so no Glamourer write).
         Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv5RunType, ".ctor"),
-                new MethodName(Hv5SpawnRunType, ".ctor") },
+                new MethodName(Hv5SpawnRunType, ".ctor"), new MethodName(Hv6RunType, ".ctor") },
             Plugin.Callers(target => target.Type == Hv3GlamourerType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
                 .ToArray());
-        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor") },
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv3RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor"),
+                new MethodName(Hv6RunType, ".ctor") },
             Plugin.ReferenceCallers(target => target.Type == Hv3StageType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
                 .ToArray());
         Assert.DoesNotContain(Plugin.ReferenceCallers(target => target.Type.StartsWith("Glamourer.", StringComparison.Ordinal) &&
@@ -563,12 +568,13 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
             Plugin.Callers(target => target.Type == Hv4RunType && target.Name == ".ctor").ToArray());
-        // HV-5 M2's spawn composes the same Customize+ adapter and stage in its own runner; HV-5 M3's capture constructs the adapter
+        // HV-5 M2's spawn and HV-6's shared host compose the same Customize+ adapter and stage in their own runners; HV-5 M3's capture constructs the adapter
         // for its profile read only, and no stage.
-        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor") },
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor"),
+                new MethodName(Hv6RunType, ".ctor") },
             Plugin.Callers(target => target.Type == Hv4CustomizePlusType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
                 .ToArray());
-        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor") },
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor"), new MethodName(Hv6RunType, ".ctor") },
             Plugin.ReferenceCallers(target => target.Type == Hv4StageType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
                 .ToArray());
     }
@@ -713,11 +719,12 @@ public sealed class ReleaseDebugSeparationTests
             return;
         Assert.Equal(new[] { new MethodName(Hv5RunType, ".ctor") },
             Plugin.Callers(target => target.Type == Hv5SpawnRunType && target.Name == ".ctor").ToArray());
-        // Only the spawn runner (and what the compiler nests in it) hands the draw-object read to a plan.
+        // Only the spawn runner and HV-6's shared host (and what the compiler nests in them) hand the draw-object read to a plan.
         var drawReaders = Plugin.Callers(target => target.Type == "RSyncStageCraft.Adapters.HumanPuppetNativeBackend" &&
             target.Name == "HumanDrawObject").ToArray();
         Assert.NotEmpty(drawReaders);
-        Assert.All(drawReaders, caller => Assert.StartsWith(Hv5SpawnRunType, caller.Type, StringComparison.Ordinal));
+        Assert.All(drawReaders, caller => Assert.True(caller.Type.StartsWith(Hv5SpawnRunType, StringComparison.Ordinal) ||
+            caller.Type.StartsWith(Hv6RunType, StringComparison.Ordinal), caller.ToString()));
         // The entry's structured state is read back only through the Glamourer stage, and the adapter's key-0 read.
         Assert.Equal(new[] { new MethodName(Hv3GlamourerType, "StateJson") },
             Plugin.Callers(target => target.Type == Hv3GlamourerType && target.Name == "GetStateJson").ToArray());
@@ -734,8 +741,8 @@ public sealed class ReleaseDebugSeparationTests
     {
         // HV-4 r1c: positive absence in Release. In Debug, only the baseline's
         // spawn calls the home world write, no plugin method calls it, only the
-        // native adapter implements it, and only the HV-4 runner and HV-5 M2's
-        // spawn runner construct the World reads. That the spawn writes only in the HV-4 composition is a
+        // native adapter implements it, and only the HV-4 runner, HV-5 M2's
+        // spawn runner and HV-6's shared host construct the World reads. That the spawn writes only in the HV-4 composition is a
         // runtime branch, proved by the synthetic tests, not here.
         const string backend = HumanPuppetNamespace + "IHumanActorBackend";
         var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
@@ -754,9 +761,76 @@ public sealed class ReleaseDebugSeparationTests
         var writer = Assert.Single(Client.Callers(target => target.Name == "WriteHomeWorld"));
         Assert.StartsWith(Hv1BaselineType, writer.Type, StringComparison.Ordinal);
         Assert.StartsWith("<Spawn>", writer.Name, StringComparison.Ordinal);
-        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor") },
+        Assert.Equal(new[] { new MethodName(Hv4RunType, ".ctor"), new MethodName(Hv5SpawnRunType, ".ctor"), new MethodName(Hv6RunType, ".ctor") },
             Plugin.Callers(target => target.Type == Hv4WorldDataType && target.Name == ".ctor").OrderBy(caller => caller.Type, StringComparer.Ordinal)
                 .ToArray());
+    }
+
+    private const string Hv6RunType = "RSyncStageCraft.HumanSharedActorRun";
+
+    /// <summary>HV-6's Client types: the facts, the package and its builder, the received entry, the preparation and the steps.</summary>
+    private static readonly string[] Hv6ClientTypes =
+    [
+        HumanPuppetNamespace + "HumanSharedFacts", HumanPuppetNamespace + "HumanSharedPackage", HumanPuppetNamespace + "HumanSharedPackageBuilder",
+        HumanPuppetNamespace + "HumanSharedEntry", HumanPuppetNamespace + "HumanSharedSpawnPreparation", HumanPuppetNamespace + "HumanSharedCommand",
+        HumanPuppetNamespace + "HumanSharedStep", HumanPuppetNamespace + "HumanSharedPublisher",
+    ];
+
+    private const string HostPortType = "RSyncStageCraft.Core.Actors.IHumanActorHostPort";
+    private const string UnavailableHostType = "RSyncStageCraft.Core.Actors.UnavailableHumanActorHost";
+
+    [Fact]
+    public void TheProtocol7HumanHostPortExistsInBothBuildsAndReleaseDrawsNothing()
+    {
+        // Both builds receive protocol 7's shared humans into the desired set and tick a host; the connection
+        // binds the Release host, which draws nothing, and a Debug dev plugin may replace it with HV-6's.
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        Assert.NotNull(client.GetType(HostPortType));
+        Assert.NotNull(client.GetType(UnavailableHostType));
+        Assert.NotNull(client.GetType("RSyncStageCraft.Core.Receiver.HumanActorDesiredSet"));
+        Assert.Equal(new[] { new MethodName("RSyncStageCraft.PluginConnection", ".ctor") },
+            Plugin.ReferenceCallers(target => target.Type == UnavailableHostType && target.Name == ".ctor").ToArray());
+        Assert.Contains(Plugin.ReferenceCallers(target => target.Type == HostPortType && target.Name == "Tick"),
+            caller => caller.Type == "RSyncStageCraft.PluginConnection");
+        // Release: no plugin type implements the port; the human sends are compiled out of the editor.
+        var editor = client.GetType("RSyncStageCraft.Core.Furniture.FurnitureEditor")!;
+        Assert.Equal(Debug, editor.GetMethod("PlaceHumanAsync") is not null);
+        Assert.Equal(Debug, editor.GetMethod("SetHumanTransformAsync") is not null);
+        if (!DebugBuild())
+        {
+            Assert.Empty(Plugin.ReferenceCallers(target => target.Name is "PlaceHumanAsync" or "SetHumanTransformAsync"));
+            Assert.False(Plugin.HasType(Hv6RunType));
+        }
+    }
+
+    [Fact]
+    public void TheHv6SharedHumanHostAndItsStepsExistOnlyInDebug()
+    {
+        // HV-6: positive absence in Release. In Debug one composition site:
+        // HV-5's runner constructs the shared host, which alone composes its
+        // stages and sends the human creates and transforms.
+        var client = typeof(RSyncStageCraft.Core.RSyncStageCraftRuntime).Assembly;
+        foreach (var type in Hv6ClientTypes)
+            Assert.Equal(Debug, client.GetType(type) is not null);
+        Assert.Equal(Debug, Plugin.HasType(Hv6RunType));
+        Assert.Equal(Debug, Plugin.HasType("RSyncStageCraft.HumanSharedServices"));
+        Assert.Equal(Debug, Plugin.UserStrings.Contains("RSC HV-6"));
+        if (!DebugBuild())
+            return;
+        Assert.Equal(new[] { new MethodName(Hv5RunType, ".ctor") },
+            Plugin.Callers(target => target.Type == Hv6RunType && target.Name == ".ctor").ToArray());
+        static bool InHv6Run(MethodName caller) => caller.Type.StartsWith(Hv6RunType, StringComparison.Ordinal);
+        var senders = Plugin.ReferenceCallers(target => target.Name is "PlaceHumanAsync" or "SetHumanTransformAsync").ToArray();
+        Assert.NotEmpty(senders);
+        Assert.All(senders, caller => Assert.True(InHv6Run(caller), caller.ToString()));
+        // The host reaches Penumbra, Glamourer and Customize+ only through the adapters.
+        Assert.DoesNotContain(Plugin.CalledBy(InHv6Run), target => target.Type.StartsWith("Penumbra.", StringComparison.Ordinal) ||
+            target.Type.StartsWith("Glamourer.", StringComparison.Ordinal) || target.Type.StartsWith("CustomizePlus", StringComparison.Ordinal));
+        // It reads no Customize+ profile content, no bone names and captures nothing: the profile it applies is the bundle's.
+        Assert.DoesNotContain(Plugin.CalledBy(InHv6Run), target => target.Name is "ActiveProfile" or "SkeletonBoneNames" ||
+            target.Type == HumanPuppetNamespace + "HumanCatalogueProfileReader" || target.Type == HumanPuppetNamespace + "HumanCatalogueCapture");
+        // It never uses the W1 receiver's hold (it holds through the appearance cache).
+        Assert.DoesNotContain(Plugin.CalledBy(InHv6Run), target => target.Name == "HoldBundleAsync");
     }
 
     [Theory]

@@ -27,7 +27,7 @@ public readonly record struct ObjectMutationCompletion(
         _ => false,
     };
 
-    private bool ValidState => State is ActorState or FurnitureState or LightState && State.IsValid;
+    private bool ValidState => State is ActorState or FurnitureState or LightState or HumanActorState && State.IsValid;
 }
 
 /// <summary>
@@ -42,7 +42,7 @@ public readonly record struct ObjectSnapshotCompletion(Guid RequestId, ObjectSna
     {
         normalized = default;
         if (RequestId == Guid.Empty || !Snapshot.TryNormalize(out var snapshot) ||
-            !snapshot.Objects.All(state => state is ActorState or FurnitureState or LightState)) return false;
+            !snapshot.Objects.All(state => state is ActorState or FurnitureState or LightState or HumanActorState)) return false;
         normalized = new(RequestId, snapshot);
         return true;
     }

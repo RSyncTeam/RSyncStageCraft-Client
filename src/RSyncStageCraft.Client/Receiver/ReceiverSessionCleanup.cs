@@ -14,6 +14,7 @@ public sealed class ReceiverSessionCleanup
     private readonly LocalObjectApplyCoordinator? localObjectCoordinator;
     private readonly LocalObjectApplyRetryQueue? localObjectRetries;
     private readonly DesiredLocalObjectStore? localObjectStore;
+    private readonly HumanActorDesiredSet? humanActors;
     private readonly int maximumEntriesPerPass;
     private readonly HashSet<ReceiverSessionKey> scheduledSessions = new();
     private Task cleanupCompletion = Task.CompletedTask;
@@ -25,7 +26,8 @@ public sealed class ReceiverSessionCleanup
         int maximumEntriesPerPass = 32,
         LocalObjectApplyCoordinator? localObjectCoordinator = null,
         LocalObjectApplyRetryQueue? localObjectRetries = null,
-        DesiredLocalObjectStore? localObjectStore = null)
+        DesiredLocalObjectStore? localObjectStore = null,
+        HumanActorDesiredSet? humanActors = null)
     {
         ArgumentNullException.ThrowIfNull(authority);
         if (maximumEntriesPerPass <= 0)
@@ -37,6 +39,7 @@ public sealed class ReceiverSessionCleanup
         this.localObjectCoordinator = localObjectCoordinator;
         this.localObjectRetries = localObjectRetries;
         this.localObjectStore = localObjectStore;
+        this.humanActors = humanActors;
         this.maximumEntriesPerPass = maximumEntriesPerPass;
     }
 
@@ -59,6 +62,9 @@ public sealed class ReceiverSessionCleanup
         authority.Invalidate(session);
         eventIngress?.ClearSession(session);
         snapshotIngress?.ClearSession(session);
+        // Protocol 7: no human stays desired past its session; the human
+        // host sees the empty set and runs its cleanup.
+        humanActors?.ClearSession(session);
 
         RunBoundedPass(session);
         if (HasRemaining(session) || CleanupContinuationNeedsRecovery())

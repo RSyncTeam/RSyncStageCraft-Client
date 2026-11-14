@@ -279,6 +279,62 @@ public sealed class FurnitureEditor
             : Task.FromResult(new ServerCommandResult(ServerCommandStatus.Invalid));
     }
 
+#if RSC_DEVELOPMENT
+    /// <summary>
+    /// HV-6, Debug only (a Release build never sends a human create): places
+    /// a shared human actor (protocol 7) from one of the caller's own,
+    /// group-published, format-3 bundles, in the scene of the player's
+    /// current place. The bundle id is the only appearance identity sent; the
+    /// server checks the bundle.
+    /// </summary>
+    public Task<ServerCommandResult> PlaceHumanAsync(
+        SceneLocation? here,
+        string bundleId,
+        Vector3 position,
+        float yawRadians,
+        CancellationToken cancellationToken = default)
+    {
+        if (here is not { IsValid: true } location || LocationScenes.SceneFor(location) is not { } scene)
+            return Task.FromResult(new ServerCommandResult(ServerCommandStatus.Invalid, Detail: "Your location is not known."));
+        if (!HumanActorLimits.IsValidBundleId(bundleId))
+            return Task.FromResult(new ServerCommandResult(ServerCommandStatus.Invalid, Detail: "Not a bundle id."));
+        var state = ToState(position);
+        if (!ActorLimits.IsValidPosition(state))
+            return Task.FromResult(new ServerCommandResult(ServerCommandStatus.Invalid, Detail: "Invalid position."));
+        var payload = new HumanActorCreatePayload(scene, bundleId, state, ActorLimits.NormalizeYaw(yawRadians), location);
+        var request = new CreateObjectRequest(Guid.NewGuid(), payload);
+        return request.IsValid
+            ? submit(request, cancellationToken)
+            : Task.FromResult(new ServerCommandResult(ServerCommandStatus.Invalid));
+    }
+
+    /// <summary>
+    /// HV-6, Debug only: one shared human transform update (position and yaw
+    /// only), based on exactly the shown revision. Nothing changed sends nothing.
+    /// </summary>
+    public Task<ServerCommandResult> SetHumanTransformAsync(
+        HumanActorState basis,
+        Vector3 position,
+        float yawRadians,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(basis);
+        var target = ToState(position);
+        var yaw = ActorLimits.NormalizeYaw(yawRadians);
+        var minimal = new HumanTransformPatch(
+            Vector3.Distance(position, FurnitureLocalObjectHost.ToVector(basis.Position)) >= FurnitureTransforms.PositionEpsilon ? target : null,
+            MathF.Abs(ActorLimits.NormalizeYaw(yaw - basis.Yaw)) >= FurnitureTransforms.AngleEpsilon ? yaw : null);
+        if (minimal.Position is null && minimal.Yaw is null)
+            return Task.FromResult(new ServerCommandResult(ServerCommandStatus.Invalid, Detail: "Nothing to change."));
+        if (!minimal.IsValid)
+            return Task.FromResult(new ServerCommandResult(ServerCommandStatus.Invalid, Detail: "A human actor value is out of range."));
+        var request = new UpdateObjectRequest(Guid.NewGuid(), basis.ObjectId, basis.Revision, minimal);
+        return request.IsValid
+            ? submit(request, cancellationToken)
+            : Task.FromResult(new ServerCommandResult(ServerCommandStatus.Invalid));
+    }
+#endif
+
     /// <summary>
     /// Sets the stain (0 = Default), based on exactly the shown revision.
     /// Selecting the stain the item already has sends nothing.

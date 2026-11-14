@@ -1,0 +1,1 @@
+{"envelope":{"protocolVersion":7,"messageType":"objectDeleted","messageId":"00000000-0000-4000-8000-000000000104","sessionId":1,"sessionGeneration":2,"connectionEpoch":3},"payload":{"sequence":{"value":7},"tombstone":{"objectId":{"value":"00000000-0000-4000-8000-000000000010"},"kind":"human","deletionRevision":{"value":3}}}}

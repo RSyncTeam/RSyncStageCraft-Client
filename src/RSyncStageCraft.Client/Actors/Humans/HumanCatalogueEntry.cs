@@ -121,6 +121,13 @@ public sealed record HumanCatalogueEntry(
     /// <summary>HV-5 M3: an entry with the owner-approved Customize+ profile.</summary>
     public const string ProfileFormat = "hv5-local-2";
 
+    /// <summary>
+    /// HV-6: an entry received from a group member's shared package, built in
+    /// memory from the bundle (never written to this client's catalogue),
+    /// with or without the sender's owner-approved profile.
+    /// </summary>
+    public const string SharedFormat = "hv6-shared-1";
+
     /// <summary>No Customize+ profile was read (every <see cref="CurrentFormat"/> entry).</summary>
     public const string NoProfile = "none";
 
@@ -214,7 +221,7 @@ public static class HumanCatalogueEntryCodec
     /// <summary>Null when every field is valid; otherwise the first problem (no stored data in it).</summary>
     public static string? Problem(HumanCatalogueEntry entry)
     {
-        if (entry.Format is not (HumanCatalogueEntry.CurrentFormat or HumanCatalogueEntry.ProfileFormat))
+        if (entry.Format is not (HumanCatalogueEntry.CurrentFormat or HumanCatalogueEntry.ProfileFormat or HumanCatalogueEntry.SharedFormat))
             return "unknown format";
         if (entry.EntryId == Guid.Empty)
             return "no entry id";
@@ -299,7 +306,9 @@ public static class HumanCatalogueEntryCodec
     /// </summary>
     private static string? ProfileProblem(HumanCatalogueEntry entry)
     {
-        if (entry.Format == HumanCatalogueEntry.CurrentFormat)
+        // HV-6: a received entry follows the local rules of whichever it carries: no profile, or the owner-approved one.
+        if (entry.Format == HumanCatalogueEntry.CurrentFormat ||
+            (entry.Format == HumanCatalogueEntry.SharedFormat && entry.ProfileSource == HumanCatalogueEntry.NoProfile))
         {
             if (entry.ProfileSource != HumanCatalogueEntry.NoProfile)
                 return "unknown profile source";

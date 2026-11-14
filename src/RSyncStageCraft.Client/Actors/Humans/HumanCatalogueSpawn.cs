@@ -17,12 +17,34 @@ namespace RSyncStageCraft.Core.Actors.Humans;
 /// </summary>
 public sealed class HumanCatalogueHold : IDisposable
 {
+    private readonly IDisposable? owner;
+
     internal HumanCatalogueHold(string hash, long size, string filePath, FileStream stream)
     {
         Hash = hash;
         Size = size;
         FilePath = filePath;
         Stream = stream;
+    }
+
+    /// <summary>
+    /// HV-6: a hold on a verified appearance-cache entry. The cache's held
+    /// lease owns the handle: disposing this hold disposes the lease (the
+    /// handle is closed, then the entry unpinned), while a detach of
+    /// <see cref="Stream"/> leaves both the handle and the pin in place.
+    /// </summary>
+    internal static HumanCatalogueHold FromCache(AppearanceCacheHeldLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        if (lease.HeldStream is not { } stream)
+            throw new ArgumentException("the lease is no longer held", nameof(lease));
+        return new HumanCatalogueHold(lease.Blob.Hash.Value, lease.Blob.Size, lease.Path, stream, lease);
+    }
+
+    private HumanCatalogueHold(string hash, long size, string filePath, FileStream stream, IDisposable owner)
+        : this(hash, size, filePath, stream)
+    {
+        this.owner = owner;
     }
 
     public string Hash { get; }
@@ -37,7 +59,13 @@ public sealed class HumanCatalogueHold : IDisposable
     /// <summary>The 8-character hash used in log lines.</summary>
     public string ShortHash => Hash[..8];
 
-    public void Dispose() => Stream.Dispose();
+    public void Dispose()
+    {
+        if (owner is not null)
+            owner.Dispose();
+        else
+            Stream.Dispose();
+    }
 
     /// <summary>Never the path.</summary>
     public override string ToString() => $"held file {ShortHash}";

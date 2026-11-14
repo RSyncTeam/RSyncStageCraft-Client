@@ -14,12 +14,13 @@ public sealed class ActorProtocolTests
     private static readonly RscUserId Owner = new("owner");
 
     [Fact]
-    public void Protocol6IsCurrentAndProtocol5IsRefused()
+    public void Protocol7IsCurrentAndProtocols5And6AreRefused()
     {
-        Assert.Equal(6, ProtocolConstants.CurrentVersion);
+        Assert.Equal(7, ProtocolConstants.CurrentVersion);
         var codec = new ObjectControlMessageCodec();
         var envelope = new SessionMessageEnvelope(5, ObjectProtocolMessageType.CreateObject, Guid.NewGuid(), 1, 1, 1);
         Assert.False(codec.TryEncode(envelope, Create(), out _, out _));
+        Assert.False(codec.TryEncode(envelope with { ProtocolVersion = 6 }, Create(), out _, out _));
     }
 
     [Fact]

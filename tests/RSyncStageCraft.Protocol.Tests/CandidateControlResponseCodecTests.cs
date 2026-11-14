@@ -158,11 +158,12 @@ public sealed class CandidateControlResponseCodecTests
         Assert.False(new ObjectControlMessageCodec(64, ProtocolConstants.CurrentVersion)
             .TryDecode(new byte[65], out _, out error));
         Assert.Equal(ObjectControlCodecError.MessageTooLarge, error);
-        // Protocol 6: one active version; older ones are refused.
-        Assert.Equal(6, ProtocolConstants.CurrentVersion);
+        // Protocol 7: one active version; older and newer ones are refused.
+        Assert.Equal(7, ProtocolConstants.CurrentVersion);
         Assert.Throws<ArgumentOutOfRangeException>(() => new ObjectControlMessageCodec(protocolVersion: 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => new ObjectControlMessageCodec(protocolVersion: 5));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new ObjectControlMessageCodec(protocolVersion: 7));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ObjectControlMessageCodec(protocolVersion: 6));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ObjectControlMessageCodec(protocolVersion: 8));
     }
 
     private static ObjectControlMessageCodec Candidate() => new(protocolVersion: ProtocolConstants.CurrentVersion);

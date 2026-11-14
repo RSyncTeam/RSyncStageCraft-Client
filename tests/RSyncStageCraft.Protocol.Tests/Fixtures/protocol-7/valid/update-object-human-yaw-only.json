@@ -1,0 +1,1 @@
+{"envelope":{"protocolVersion":7,"messageType":"updateObject","messageId":"00000000-0000-4000-8000-000000000100","sessionId":1,"sessionGeneration":2,"connectionEpoch":3},"payload":{"requestId":"00000000-0000-4000-8000-000000000100","objectId":{"value":"00000000-0000-4000-8000-000000000010"},"baseRevision":{"value":2},"patch":{"$kind":"humanTransform","position":null,"yaw":0.25}}}

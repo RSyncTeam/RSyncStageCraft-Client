@@ -5,7 +5,21 @@ namespace RSyncStageCraft.Core.Scenes;
 
 public static class SceneFormat
 {
-    public const int CurrentVersion = 1;
+    /// <summary>
+    /// Scene format 2 (protocol 7) adds the <c>human</c> record. A server
+    /// always writes the current format; it still reads format 1, which can
+    /// hold no human record. Older servers refuse a format-2 file whole.
+    /// </summary>
+    public const int CurrentVersion = 2;
+
+    /// <summary>The oldest format still read.</summary>
+    public const int FirstReadableVersion = 1;
+
+    /// <summary>The first format that may hold a <c>human</c> record.</summary>
+    public const int HumanRecordVersion = 2;
+
+    public static bool IsReadable(int version) =>
+        version is >= FirstReadableVersion and <= CurrentVersion;
 }
 
 /// <summary>
@@ -17,7 +31,8 @@ public sealed record SceneObjectRecord(
     RscObjectKind Kind,
     ActorState? Actor = null,
     FurnitureState? Furniture = null,
-    LightState? Light = null)
+    LightState? Light = null,
+    HumanActorState? Human = null)
 {
     [JsonIgnore]
     public AuthoritativeObjectState? State => Kind switch
@@ -25,6 +40,7 @@ public sealed record SceneObjectRecord(
         RscObjectKind.Actor => Actor,
         RscObjectKind.Furniture => Furniture,
         RscObjectKind.Light => Light,
+        RscObjectKind.Human => Human,
         _ => null,
     };
 
@@ -39,7 +55,8 @@ public sealed record SceneObjectRecord(
             var populated =
                 (Actor is null ? 0 : 1) +
                 (Furniture is null ? 0 : 1) +
-                (Light is null ? 0 : 1);
+                (Light is null ? 0 : 1) +
+                (Human is null ? 0 : 1);
             return populated == 1 &&
                 State is { IsValid: true } state &&
                 state.Kind == Kind;
@@ -54,6 +71,7 @@ public sealed record SceneObjectRecord(
             ActorState actor => new(RscObjectKind.Actor, Actor: actor),
             FurnitureState furniture => new(RscObjectKind.Furniture, Furniture: furniture),
             LightState light => new(RscObjectKind.Light, Light: light),
+            HumanActorState human => new(RscObjectKind.Human, Human: human),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(state),
                 state.GetType(),
@@ -130,7 +148,7 @@ public sealed record SceneDocument(
         out SceneObjectRecord[] objects,
         out ObjectTombstone[] tombstones)
     {
-        if (FormatVersion != SceneFormat.CurrentVersion ||
+        if (!SceneFormat.IsReadable(FormatVersion) ||
             !SceneId.IsValid ||
             SceneGeneration <= 0 ||
             SavedAtUtc == default ||
@@ -146,7 +164,9 @@ public sealed record SceneDocument(
                 record is not { IsValid: true } ||
                 record.State!.SceneId != SceneId ||
                 // The location is stored once, on the scene.
-                record.State.Location is not null) ||
+                record.State.Location is not null ||
+                // Format 1 cannot hold a human record.
+                (record.Kind == RscObjectKind.Human && FormatVersion < SceneFormat.HumanRecordVersion)) ||
             tombstones.Any(tombstone => !tombstone.IsValid))
         {
             objects = [];

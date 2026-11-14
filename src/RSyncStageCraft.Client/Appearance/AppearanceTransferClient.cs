@@ -21,7 +21,11 @@ public sealed class AppearanceTransferOptions
 }
 
 /// <summary>A downloaded bundle: its exact canonical manifest bytes, with every blob verified in the cache.</summary>
-public sealed record AppearanceBundleDownload(AppearanceTransferResult Result, AppearanceBundleManifest? Manifest = null, byte[]? ManifestBytes = null);
+public sealed record AppearanceBundleDownload(AppearanceTransferResult Result, AppearanceBundleManifest? Manifest = null, byte[]? ManifestBytes = null)
+{
+    /// <summary>HV-6: how many of the bundle's blobs this download fetched (the rest were already verified in the cache).</summary>
+    public int DownloadedBlobs { get; init; }
+}
 
 /// <summary>Where an upload is: only file uploads can be cancelled; a commit request, once sent, cannot.</summary>
 public enum AppearanceUploadPhase
@@ -151,7 +155,8 @@ public sealed class AppearanceTransferClient : IDisposable
         IReadOnlyDictionary<ContentHash, string> sources,
         ContentHash? replaces = null,
         CancellationToken cancellationToken = default,
-        Action<AppearanceUploadPhase>? phase = null)
+        Action<AppearanceUploadPhase>? phase = null,
+        Action<int>? missing = null)
     {
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(sources);
@@ -166,7 +171,13 @@ public sealed class AppearanceTransferClient : IDisposable
         phase?.Invoke(AppearanceUploadPhase.CheckingServer);
         var first = await CommitAsync(target, manifest, query, CancellationToken.None).ConfigureAwait(false);
         if (first.Result is not { Status: AppearanceTransferStatus.MissingBlobs })
+        {
+            // HV-6's counts: nothing was missing when the first commit already succeeded.
+            if (first.Result.Succeeded)
+                missing?.Invoke(0);
             return first.Result;
+        }
+        missing?.Invoke(first.Missing.Count);
         phase?.Invoke(AppearanceUploadPhase.UploadingFiles);
         var blobs = manifest.Blobs.ToDictionary(blob => blob.Hash);
         foreach (var hash in first.Missing)
@@ -193,16 +204,20 @@ public sealed class AppearanceTransferClient : IDisposable
     /// within the cache limit fails with
     /// <see cref="AppearanceTransferStatus.CacheFull"/>.
     /// </summary>
-    public async Task<AppearanceBundleDownload> DownloadBundleAsync(ContentHash bundleId, CancellationToken cancellationToken = default)
+    /// <para>HV-6: <paramref name="readOptions"/> reads a format-3 human package
+    /// only when the caller opts in; the default reads format 1 only, as before.</para>
+    public async Task<AppearanceBundleDownload> DownloadBundleAsync(ContentHash bundleId, CancellationToken cancellationToken = default,
+        AppearanceManifestReadOptions readOptions = AppearanceManifestReadOptions.FormatOneOnly)
     {
         if (Prepare() is not { } target)
             return new(new(AppearanceTransferStatus.Disabled));
-        var read = await ManifestAsync(target, bundleId, cancellationToken).ConfigureAwait(false);
+        var read = await ManifestAsync(target, bundleId, cancellationToken, readOptions).ConfigureAwait(false);
         if (read.Manifest is not { } manifest)
             return new(read.Result);
         var bytes = read.ManifestBytes!;
 
         var leases = new List<AppearanceCacheLease>();
+        var fetched = 0;
         try
         {
             foreach (var blob in manifest.Blobs)
@@ -227,8 +242,9 @@ public sealed class AppearanceTransferClient : IDisposable
                 var downloaded = await DownloadBlobAsync(target, bundleId, blob, leases, cancellationToken).ConfigureAwait(false);
                 if (!downloaded.Succeeded)
                     return new(downloaded);
+                fetched++;
             }
-            return new(AppearanceTransferResult.Success, manifest, bytes);
+            return new(AppearanceTransferResult.Success, manifest, bytes) { DownloadedBlobs = fetched };
         }
         finally
         {

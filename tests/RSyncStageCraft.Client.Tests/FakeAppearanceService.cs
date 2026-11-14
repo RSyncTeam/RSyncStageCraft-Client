@@ -44,6 +44,26 @@ internal sealed class FakeAppearanceService(long quotaBytes = long.MaxValue, int
     /// <summary>Test-only: commits format-2 manifests (a skeleton group) too. Off by default, as the format-1 server.</summary>
     public bool AcceptSkeletonGroups { get; set; }
 
+    /// <summary>HV-6, test-only: commits format-3 human packages too (as the server with AppearanceAllowHumanPackages).</summary>
+    public bool AcceptHumanPackages { get; set; }
+
+    private readonly HashSet<ContentHash> referenced = [];
+
+    /// <summary>
+    /// HV-6, test-only: what the server records while a shared human uses a
+    /// bundle: unpublish and delete are then answered 409 (still referenced).
+    /// </summary>
+    public void SetReferenced(ContentHash bundleId, bool held)
+    {
+        lock (gate)
+        {
+            if (held)
+                referenced.Add(bundleId);
+            else
+                referenced.Remove(bundleId);
+        }
+    }
+
     /// <summary>Flips the last byte of a successful blob download when it returns true.</summary>
     public Func<HttpRequestMessage, bool>? Tamper { get; set; }
 
@@ -153,7 +173,8 @@ internal sealed class FakeAppearanceService(long quotaBytes = long.MaxValue, int
 
     private HttpResponseMessage Commit(string account, byte[] body)
     {
-        var readOptions = AcceptSkeletonGroups ? AppearanceManifestReadOptions.AllowSkeletonGroups : AppearanceManifestReadOptions.FormatOneOnly;
+        var readOptions = AcceptHumanPackages ? AppearanceManifestReadOptions.AllowHumanPackages
+            : AcceptSkeletonGroups ? AppearanceManifestReadOptions.AllowSkeletonGroups : AppearanceManifestReadOptions.FormatOneOnly;
         if (AppearanceBundleManifest.TryParse(body, readOptions, out _) is not { } manifest || !manifest.CanonicalBytes.AsSpan().SequenceEqual(body))
             return Error(HttpStatusCode.BadRequest, "invalidManifest");
         if (manifest.OwnerId.Value != account)
@@ -259,6 +280,9 @@ internal sealed class FakeAppearanceService(long quotaBytes = long.MaxValue, int
         {
             if (Find(account, id) is not { } entry || entry.Owner != account)
                 return Error(HttpStatusCode.NotFound, "notFound");
+            if (referenced.Contains(entry.Manifest.BundleId) &&
+                edit.EnumerateObject().Any(property => property.Name == "published" && property.Value.ValueKind == JsonValueKind.False))
+                return Error(HttpStatusCode.Conflict, "referenced");
             foreach (var property in edit.EnumerateObject())
             {
                 switch (property.Name, property.Value.ValueKind)
@@ -293,6 +317,8 @@ internal sealed class FakeAppearanceService(long quotaBytes = long.MaxValue, int
         {
             if (Find(account, id) is not { } entry || entry.Owner != account)
                 return Error(HttpStatusCode.NotFound, "notFound");
+            if (referenced.Contains(entry.Manifest.BundleId))
+                return Error(HttpStatusCode.Conflict, "referenced");
             entries.Remove(entry.Manifest.BundleId);
             return Json(HttpStatusCode.OK, writer => writer.WriteString("status", "deleted"));
         }
